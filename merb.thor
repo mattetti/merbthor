@@ -52,13 +52,13 @@ module GemManagement
       version = options.delete(:version)
       Gem.configuration.update_sources = false
 
+      # Limit source index to install dir
       update_source_index(options[:install_dir]) if options[:install_dir]
 
       installer = Gem::DependencyInstaller.new(options.merge(:user_install => false))
       
-      # Exclude gems to refresh from index - force (re)install of new version
-      # def installer.source_index; @source_index; end
-      unless refresh.empty?
+      # Force-refresh certain gems by excluding them from the current index
+      if refresh.respond_to?(:include?) && !refresh.empty?
         source_index = installer.instance_variable_get(:@source_index)
         source_index.gems.each do |name, spec| 
           source_index.gems.delete(name) if refresh.include?(spec.name)
@@ -209,6 +209,29 @@ module GemManagement
     end
   end
   
+  # Partition gems into system, local and missing gems
+  def partition_dependencies(dependencies, gem_dir)
+    system_specs, local_specs, missing_deps = [], [], []
+    if gem_dir && File.directory?(gem_dir)
+      gem_dir = File.expand_path(gem_dir)
+      ::Gem.clear_paths; ::Gem.path.unshift(gem_dir)
+      ::Gem.source_index.refresh!
+      dependencies.each do |dep|
+        if gemspec = ::Gem.source_index.search(dep).last
+          if gemspec.loaded_from.index(gem_dir) == 0
+            local_specs  << gemspec
+          else
+            system_specs << gemspec
+          end
+        else
+          missing_deps << dep
+        end
+      end
+      ::Gem.clear_paths
+    end
+    [system_specs, local_specs, missing_deps]
+  end
+  
   # Create a modified executable wrapper in the specified bin directory.
   def ensure_bin_wrapper_for(gem_dir, bin_dir, *gems)
     if bin_dir && File.directory?(bin_dir)
@@ -283,9 +306,39 @@ end
 
 module MerbThorHelper
   
+  attr_accessor :include_dependencies
+  
   def self.included(base)
     base.send(:include, ColorfulMessages)
     base.extend ColorfulMessages
+  end
+    
+  def display_gemspecs(gemspecs)
+    gemspecs.each { |spec| puts "- #{spec.full_name}" }
+  end
+  
+  def display_dependencies(dependencies)
+    dependencies.each { |d| puts "- #{d.name} (#{d.version_requirements})" }
+  end
+  
+  def default_install_options
+    { :install_dir => gem_dir, :ignore_dependencies => ignore_dependencies? }
+  end
+  
+  def default_uninstall_options
+    { :install_dir => gem_dir, :ignore => true, :all => true, :executables => true }
+  end
+  
+  def dry_run?
+    options[:"dry-run"]
+  end
+  
+  def ignore_dependencies?
+    options[:"ignore-dependencies"] || !include_dependencies?
+  end
+  
+  def include_dependencies?
+    options[:"include-dependencies"] || self.include_dependencies
   end
   
   # The current working directory, or Merb app root (--merb-root option).
@@ -302,6 +355,27 @@ module MerbThorHelper
   
   def default_gem_dir
     File.join(working_dir, 'gems')
+  end
+  
+  # If we're in a Merb app, we can have a ./bin directory;
+  # create it if it's not there.
+  def bin_dir
+    @_bin_dir ||= begin
+      if gem_dir
+        dir = File.join(working_dir, 'bin')
+        create_if_missing(dir)
+        dir
+      end
+    end
+  end
+  
+  # Helper to create dir unless it exists.
+  def create_if_missing(path)
+    FileUtils.mkdir(path) unless File.exists?(path)
+  end
+
+  def ensure_bin_wrapper_for(*gems)
+    Merb::Gem.ensure_bin_wrapper_for(gem_dir, bin_dir, *gems)
   end
   
 end
@@ -328,9 +402,7 @@ module Merb
     }
     
     method_options global_method_options
-    def initialize(*args)
-      super
-    end
+    def initialize(*args); super; end
     
     # List application dependencies.
     #
@@ -352,7 +424,7 @@ module Merb
     desc 'list [all|local|system|missing] [comp]', 'Show application dependencies'
     def list(filter = 'all', comp = nil)
       deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
-      self.system, self.local, self.missing = self.class.partition_dependencies(deps, gem_dir)
+      self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
       case filter
       when 'all'
         message 'Installed system gem dependencies:'  unless system.empty? 
@@ -387,7 +459,7 @@ module Merb
     # 
     # Examples:
     #
-    # merb:dependencies:install (stable|edge)                   # install all dependencies - the default
+    # merb:dependencies:install                                 # install all dependencies using stable strategy
     # merb:dependencies:install stable --version 0.9.8          # install a specific version of the framework
     # merb:dependencies:install stable missing                  # install currently missing gems locally
     # merb:dependencies:install stable merb-more                # install only merb-more related dependencies
@@ -395,9 +467,14 @@ module Merb
     # merb:dependencies:install stable --no-stack               # install 3rd party dependencies
     # merb:dependencies:install stable --config                 # read dependencies from the default config
     # merb:dependencies:install stable --config-file file.yml   # read from the specified config file
+    #
+    # In addition to the options above, edge install uses the following: 
+    #
+    # merb:dependencies:install edge                            # install all dependencies using edge strategy
+    # merb:dependencies:install edge --sources file.yml         # install edge from the specified git sources config
     
     desc 'install [stable|edge] [comp]', 'Install application dependencies'
-    method_options "--dry-run" => :boolean, "--force" => :boolean
+    method_options "--dry-run" => :boolean, "--force" => :boolean, "--sources" => :optional
     def install(strategy = 'stable', comp = nil)
       if self.respond_to?(method = :"#{strategy}_strategy", true)
         # When comp == 'missing' then filter on missing dependencies
@@ -410,7 +487,7 @@ module Merb
         
         # If comp given, filter on known stack components
         deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
-        self.system, self.local, self.missing = self.class.partition_dependencies(deps, gem_dir)
+        self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
         
         # Only install currently missing gems (for comp == missing)
         if only_missing
@@ -426,6 +503,9 @@ module Merb
         
           # Run the chosen strategy
           send(method, deps)
+          
+          # Add local binaries for the installed framework dependencies
+          ensure_bin_wrapper_for(*Merb::Stack.framework_components)
         end
         
         # Show current dependency info now that we're done
@@ -434,7 +514,9 @@ module Merb
       else
         warning "Invalid install strategy '#{strategy}'"
         puts
-        puts "TODO"
+        message "Please choose one of the following installation strategies: stable or edge:"
+        puts "$ thor merb:dependencies:install stable"
+        puts "$ thor merb:dependencies:install edge"
       end      
     end
     
@@ -458,7 +540,7 @@ module Merb
     def uninstall(comp = nil)
       # If comp given, filter on known stack components
       deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
-      self.system, self.local, self.missing = self.class.partition_dependencies(deps, gem_dir)
+      self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
       # Clobber existing local dependencies - based on self.local
       clobber_dependencies!
     end
@@ -503,22 +585,6 @@ module Merb
     end    
     
     ### Helper Methods
-    
-    def default_install_options
-      { :install_dir => gem_dir, :ignore_dependencies => ignore_dependencies? }
-    end
-    
-    def default_uninstall_options
-      { :install_dir => gem_dir, :ignore => true, :executables => true }
-    end
-    
-    def dry_run?
-      options[:"dry-run"]
-    end
-    
-    def ignore_dependencies?
-      not options[:"include-dependencies"]
-    end
     
     def dependencies
       if use_config?
@@ -574,14 +640,6 @@ module Merb
     
     def config_dir
       File.dirname(config_file)
-    end
-    
-    def display_gemspecs(gemspecs)
-      gemspecs.each { |spec| puts "- #{spec.full_name}" }
-    end
-    
-    def display_dependencies(dependencies)
-      dependencies.each { |d| puts "- #{d.name} (#{d.version_requirements})" }
     end
     
     def install_dependency(dependency)
@@ -676,34 +734,13 @@ module Merb
       dependencies
     end
     
-    # Partition gems into system, local and missing gems
-    def self.partition_dependencies(dependencies, gem_dir)
-      system_specs, local_specs, missing_deps = [], [], []
-      if gem_dir && File.directory?(gem_dir)
-        gem_dir = File.expand_path(gem_dir)
-        ::Gem.clear_paths; ::Gem.path.unshift(gem_dir)
-        ::Gem.source_index.refresh!     
-        dependencies.each do |dep|
-          if gemspec = ::Gem.source_index.search(dep).last
-            if gemspec.loaded_from.index(gem_dir) == 0
-              local_specs  << gemspec
-            else
-              system_specs << gemspec
-            end
-          else
-            missing_deps << dep
-          end
-        end
-        ::Gem.clear_paths
-      end
-      [system_specs, local_specs, missing_deps]
-    end
-    
   end  
   
   class Stack < Thor
     
-    MERB_CORE = %w[merb-core]
+    include MerbThorHelper
+    
+    MERB_CORE = %w[extlib merb-core]
     MERB_MORE = %w[
       merb-action-args merb-assets merb-gen merb-haml
       merb-builder merb-mailer merb-parts merb-cache 
@@ -715,13 +752,24 @@ module Merb
     ]
     DM_CORE = %w[dm-core]
     DM_MORE = %w[merb_datamapper]
-      
+    
+    # global_method_options = {
+    #   "--merb-root"            => :optional,  # the directory to operate on
+    #   "--include-dependencies" => :boolean,   # gather sub-dependencies
+    #   "--stack"                => :boolean,   # gather only stack dependencies
+    #   "--no-stack"             => :boolean,   # gather only non-stack dependencies
+    #   "--version"              => :optional   # gather specific version of framework
+    # }
+    
+    # method_options global_method_options
+    def initialize(*args); super; end
+    
     desc 'list [stable|edge]', 'Show framework dependencies'
     def list
       
     end
     
-    def install(strategy = 'none')
+    def install()
       
     end
     
@@ -775,7 +823,7 @@ module Merb
     end
     
     def self.select_component_dependencies(dependencies, comp = nil)
-      comps = components(comp)
+      comps = components(comp) || []
       dependencies.select { |dep| comps.include?(dep.name) }
     end
     
@@ -789,35 +837,146 @@ module Merb
   
   class Gem < Thor
     
+    include MerbThorHelper
     extend GemManagement
     
-    # group 'devel'
+    attr_accessor :system, :local, :missing
     
-    desc 'list', 'list gems'
-    def list
-      
+    global_method_options = {
+      "--merb-root"            => :optional,  # the directory to operate on
+      "--version"              => :optional,  # gather specific version of gem
+      "--ignore-dependencies"  => :boolean    # don't install sub-dependencies
+    }
+    
+    method_options global_method_options
+    def initialize(*args); super; end
+    
+    #### List application dependencies.
+    #### 
+    #### By default all dependencies are listed, partitioned into system, local and
+    #### currently missing dependencies. The first argument allows you to filter
+    #### on any of the partitionings. A second argument can be used to filter on
+    #### a set of known components, like all merb-more gems for example.
+    #### 
+    #### Examples:
+    #### 
+    #### merb:dependencies:list                                    # list all dependencies - the default
+    #### merb:dependencies:list local                              # list only local gems
+    #### merb:dependencies:list all merb-more                      # list only merb-more related dependencies
+    #### merb:dependencies:list --stack                            # list framework dependencies
+    #### merb:dependencies:list --no-stack                         # list 3rd party dependencies
+    #### merb:dependencies:list --config                           # list dependencies from the default config
+    #### merb:dependencies:list --config-file file.yml             # list from the specified config file
+       
+    desc 'list [all|local|system] [comp]', 'Show installed gems'
+    def list(filter = 'local', comp = nil)
+      deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
+      self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
+      case filter
+      when 'all'
+        message 'Installed system gems:'  unless system.empty? 
+        display_gemspecs(system)
+        message 'Installed local gems:'   unless local.empty? 
+        display_gemspecs(local)
+      when 'system'
+        message 'Installed system gems:'  unless system.empty? 
+        display_gemspecs(system)
+      when 'local'
+        message 'Installed local gems:'   unless local.empty? 
+        display_gemspecs(local)
+      else
+        warning "Invalid listing filter '#{filter}'"
+      end
     end
     
-    def install
+    desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from rubygems'
+    method_options "--cache"     => :boolean,
+                   "--binaries"  => :boolean,
+                   "--dry-run"   => :boolean,
+                   "--force"     => :boolean
+    def install(*names)
+      self.include_dependencies = true # deal with dependencies by default
+      opts = { :version => options[:version], :cache => options[:cache] }
+      current_gem = nil
       
+      # uninstall existing gems of the ones we're going to install
+      uninstall(*names) if options[:force]
+      
+      names.each do |gem_name|
+        current_gem = gem_name      
+        if dry_run?
+          note "Installing #{current_gem}..."
+        else
+          message "Installing #{current_gem}..."
+          self.class.install(gem_name, default_install_options.merge(opts))
+          ensure_bin_wrapper_for(gem_name) if options[:binaries]
+        end
+      end
+    rescue => e
+      error "Failed to install #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
-    def uninstall
-      
+    desc 'uninstall GEM_NAME [GEM_NAME, ...]', 'Unstall a gem'
+    method_options "--dry-run"   => :boolean,
+                   "--force"     => :boolean
+    def uninstall(*names)
+      self.include_dependencies = true # deal with dependencies by default
+      opts = { :version => options[:version] }
+      current_gem = nil
+      if dry_run?
+        note "Uninstalling any existing gems of: #{names.join(', ')}"
+      else
+        message "Uninstalling any existing gems of: #{names.join(', ')}"
+        names.each do |gem_name|
+          current_gem = gem_name
+          Merb::Gem.uninstall(gem_name, default_uninstall_options) rescue nil
+          # if this gem is a meta-gem or a component set name, remove sub-gems
+          (Merb::Stack.components(gem_name) || []).each do |comp|
+            Merb::Gem.uninstall(comp, default_uninstall_options) rescue nil
+          end
+        end
+      end 
+    rescue => e
+      error "Failed to uninstall #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
+    private
+    
+    # Return dependencies for all installed gems; both system-wide and locally;
+    # optionally filters on :version requirement.
+    def dependencies
+      version_req = if options[:version]
+        ::Gem::Requirement.create(options[:version])
+      else
+        ::Gem::Requirement.default
+      end
+      if gem_dir
+        ::Gem.clear_paths; ::Gem.path.unshift(gem_dir)
+        ::Gem.source_index.refresh!
+      end
+      deps = []
+      ::Gem.source_index.each do |fullname, gemspec| 
+        if version_req.satisfied_by?(gemspec.version)
+          deps << ::Gem::Dependency.new(gemspec.name, "= #{gemspec.version}")
+        end
+      end
+      ::Gem.clear_paths if gem_dir
+      deps.sort
+    end
+    
+    public
     
     # Install gem with some default options.
-    def self.install(name, opts = {})
+    def self.install(name, options = {})
       defaults = {}
       defaults[:cache] = false unless opts[:install_dir]
-      install_gem(name, defaults.merge(opts))
+      install_gem(name, defaults.merge(options))
     end
     
     # Uninstall gem with some default options.
-    def self.uninstall(name, opts = {})
+    def self.uninstall(name, options = {})
       defaults = { :ignore => true, :executables => true }
-      uninstall_gem(name, defaults.merge(opts))
+      uninstall_gem(name, defaults.merge(options))
     end
     
   end
