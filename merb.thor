@@ -317,19 +317,39 @@ module Merb
     
     include MerbThorHelper
     
-    default_method_options = {
+    global_method_options = {
       "--merb-root"            => :optional,  # the directory to operate on
-      "--include-dependencies" => :boolean,   # install sub-dependencies
-      "--stack"                => :boolean,   # install only stack dependencies
-      "--no-stack"             => :boolean,   # install only non-stack dependencies
-      "--config"               => :boolean,   # install dependencies from yaml config
-      "--config-file"          => :optional,  # install from the specified yaml config
-      "--force"                => :boolean,   # force the current operation
-      "--version"              => :optional   # install specific version of framework
+      "--include-dependencies" => :boolean,   # gather sub-dependencies
+      "--stack"                => :boolean,   # gather only stack dependencies
+      "--no-stack"             => :boolean,   # gather only non-stack dependencies
+      "--config"               => :boolean,   # gather dependencies from yaml config
+      "--config-file"          => :optional,  # gather from the specified yaml config
+      "--version"              => :optional   # gather specific version of framework
     }
     
+    method_options global_method_options
+    def initialize(*args)
+      super
+    end
+    
+    # List application dependencies.
+    #
+    # By default all dependencies are listed, partitioned into system, local and
+    # currently missing dependencies. The first argument allows you to filter
+    # on any of the partitionings. A second argument can be used to filter on
+    # a set of known components, like all merb-more gems for example.
+    # 
+    # Examples:
+    #
+    # merb:dependencies:list                                    # list all dependencies - the default
+    # merb:dependencies:list local                              # list only local gems
+    # merb:dependencies:list all merb-more                      # list only merb-more related dependencies
+    # merb:dependencies:list --stack                            # list framework dependencies
+    # merb:dependencies:list --no-stack                         # list 3rd party dependencies
+    # merb:dependencies:list --config                           # list dependencies from the default config
+    # merb:dependencies:list --config-file file.yml             # list from the specified config file
+       
     desc 'list [all|local|system|missing] [comp]', 'Show application dependencies'
-    method_options default_method_options
     def list(filter = 'all', comp = nil)
       deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
       self.system, self.local, self.missing = self.class.partition_dependencies(deps, gem_dir)
@@ -355,11 +375,29 @@ module Merb
       end
     end
     
-    # thor merb:dependencies:install stable merb-more
-    # thor merb:dependencies:install stable missing
+    # Install application dependencies.
+    #
+    # By default all required dependencies are installed. The first argument 
+    # specifies which strategy to use: stable or edge. A second argument can be 
+    # used to filter on a set of known components.
+    #
+    # Existing dependencies will be clobbered; when :force => true then all gems
+    # will be cleared first, otherwise only existing local dependencies of the
+    # gems to be installed will be removed.
+    # 
+    # Examples:
+    #
+    # merb:dependencies:install (stable|edge)                   # install all dependencies - the default
+    # merb:dependencies:install stable --version 0.9.8          # install a specific version of the framework
+    # merb:dependencies:install stable missing                  # install currently missing gems locally
+    # merb:dependencies:install stable merb-more                # install only merb-more related dependencies
+    # merb:dependencies:install stable --stack                  # install framework dependencies
+    # merb:dependencies:install stable --no-stack               # install 3rd party dependencies
+    # merb:dependencies:install stable --config                 # read dependencies from the default config
+    # merb:dependencies:install stable --config-file file.yml   # read from the specified config file
     
     desc 'install [stable|edge] [comp]', 'Install application dependencies'
-    method_options default_method_options.merge("--dry-run" => :boolean)
+    method_options "--dry-run" => :boolean, "--force" => :boolean
     def install(strategy = 'stable', comp = nil)
       if self.respond_to?(method = :"#{strategy}_strategy", true)
         # When comp == 'missing' then filter on missing dependencies
@@ -395,30 +433,70 @@ module Merb
         list('all', comp)
       else
         warning "Invalid install strategy '#{strategy}'"
+        puts
+        puts "TODO"
       end      
     end
     
+    # Uninstall application dependencies.
+    #
+    # By default all required dependencies are installed. An optional argument 
+    # can be used to filter on a set of known components.
+    #
+    # Existing dependencies will be clobbered; when :force => true then all gems
+    # will be cleared , otherwise only existing local dependencies of the
+    # matching component set will be removed.
+    #
+    # Examples:
+    #
+    # merb:dependencies:uninstall                               # uninstall all dependencies - the default
+    # merb:dependencies:uninstall merb-more                     # uninstall merb-more related gems locally
+    # merb:dependencies:uninstall --config                      # read dependencies from the default config
+    
     desc 'uninstall [comp]', 'Uninstall application dependencies'
-    method_options default_method_options.merge("--dry-run" => :boolean)
+    method_options "--dry-run" => :boolean, "--force" => :boolean
     def uninstall(comp = nil)
       # If comp given, filter on known stack components
       deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
       self.system, self.local, self.missing = self.class.partition_dependencies(deps, gem_dir)
-      # Clobber existing local dependencies
+      # Clobber existing local dependencies - based on self.local
       clobber_dependencies!
     end
     
-    desc 'configure', 'Create a dependencies config file'
-    method_options default_method_options
-    def configure
-      FileUtils.mkdir_p(config_dir) unless File.directory?(config_dir)
-      config = YAML.dump(dependencies.map { |d| d.to_s })
+    # Create a dependencies configuration file.
+    #
+    # A configuration yaml file will be created from the extracted application
+    # dependencies. The format of the configuration is as follows:
+    #
+    # --- 
+    # - merb-core (= 0.9.8, runtime)
+    # - merb-slices (= 0.9.8, runtime)
+    # 
+    # This format is exactly the same as Gem::Dependency#to_s returns.
+    #
+    # Examples:
+    #
+    # merb:dependencies:configure --force                       # overwrite the default config file
+    # merb:dependencies:configure --version 0.9.8               # configure specific framework version
+    # merb:dependencies:configure --config-file file.yml        # write to the specified config file 
+    
+    desc 'configure [comp]', 'Create a dependencies config file'
+    method_options "--dry-run" => :boolean, "--force" => :boolean
+    def configure(comp = nil)
+      # If comp given, filter on known stack components
+      deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
+      config = YAML.dump(deps.map { |d| d.to_s })
       puts "#{config}\n"
       if File.exists?(config_file) && !options[:force]
         error "File already exists! Use --force to overwrite."
       else
-        File.open(config_file, 'w') { |f| f.write config }
-        success "Written #{config_file}:"
+        if dry_run?
+          note "Written #{config_file}"
+        else
+          FileUtils.mkdir_p(config_dir) unless File.directory?(config_dir)
+          File.open(config_file, 'w') { |f| f.write config }
+          success "Written #{config_file}"
+        end
       end
     rescue  
       error "Failed to write to #{config_file}"
@@ -557,9 +635,10 @@ module Merb
       end
     end
     
-    # def edge_strategy(deps)
-    #   p deps
-    # end
+    def edge_strategy(deps)
+      # TODO
+      p deps
+    end
     
     ### Class Methods
     
@@ -712,6 +791,9 @@ module Merb
     
     extend GemManagement
     
+    # group 'devel'
+    
+    desc 'list', 'list gems'
     def list
       
     end
