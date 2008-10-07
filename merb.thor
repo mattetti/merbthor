@@ -851,22 +851,20 @@ module Merb
     method_options global_method_options
     def initialize(*args); super; end
     
-    #### List application dependencies.
-    #### 
-    #### By default all dependencies are listed, partitioned into system, local and
-    #### currently missing dependencies. The first argument allows you to filter
-    #### on any of the partitionings. A second argument can be used to filter on
-    #### a set of known components, like all merb-more gems for example.
-    #### 
-    #### Examples:
-    #### 
-    #### merb:dependencies:list                                    # list all dependencies - the default
-    #### merb:dependencies:list local                              # list only local gems
-    #### merb:dependencies:list all merb-more                      # list only merb-more related dependencies
-    #### merb:dependencies:list --stack                            # list framework dependencies
-    #### merb:dependencies:list --no-stack                         # list 3rd party dependencies
-    #### merb:dependencies:list --config                           # list dependencies from the default config
-    #### merb:dependencies:list --config-file file.yml             # list from the specified config file
+    # List gems that match the specified criteria.
+    #
+    # By default all local gems are listed. When the first argument is 'all' the
+    # list is partitioned into system an local gems; specify 'system' to show
+    # only system gems. A second argument can be used to filter on a set of known
+    # components, like all merb-more gems for example.
+    # 
+    # Examples:
+    #
+    # merb:gem:list                                    # list all local gems - the default
+    # merb:gem:list all                                # list system and local gems
+    # merb:gem:list system                             # list only system gems
+    # merb:gem:list all merb-more                      # list only merb-more related gems
+    # merb:gem:list --version 0.9.8                    # list gems that match the version    
        
     desc 'list [all|local|system] [comp]', 'Show installed gems'
     def list(filter = 'local', comp = nil)
@@ -889,6 +887,24 @@ module Merb
       end
     end
     
+    # Install the specified gems.
+    #
+    # All arguments should be names of gems to install.
+    #
+    # When :force => true then any existing versions of the gems to be installed
+    # will be uninstalled first. It's important to note that so-called meta-gems
+    # or gems that exactly match a set of Merb::Stack.components will have their
+    # sub-gems uninstalled too. For example, uninstalling merb-more will install
+    # all contained gems: merb-action-args, merb-assets, merb-gen, ...
+    # 
+    # Examples:
+    #
+    # merb:gems:install merb-core merb-slices          # install all specified gems
+    # merb:gems:install merb-core --version 0.9.8      # install a specific version of a gem
+    # merb:gems:install merb-core --force              # uninstall then subsequently install the gem
+    # merb:gems:install merb-core --cache              # try to install locally from system gems
+    # merb:gems:install merb-core --binaries           # also install adapted bin wrapper
+     
     desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from rubygems'
     method_options "--cache"     => :boolean,
                    "--binaries"  => :boolean,
@@ -916,9 +932,24 @@ module Merb
       error "Failed to install #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
+    # Uninstall the specified gems.
+    #
+    # By default all specified gems are uninstalled. It's important to note that 
+    # so-called meta-gems or gems that match a set of Merb::Stack.components will 
+    # have their sub-gems uninstalled too. For example, uninstalling merb-more 
+    # will install all contained gems: merb-action-args, merb-assets, ...
+    #
+    # Existing dependencies will be clobbered; when :force => true then all gems
+    # will be cleared , otherwise only existing local dependencies of the
+    # matching component set will be removed.
+    #
+    # Examples:
+    #
+    # merb:gem:uninstall merb-core merb-slices         # uninstall all specified gems
+    # merb:gems:install merb-core --version 0.9.8      # uninstall a specific version of a gem
+    
     desc 'uninstall GEM_NAME [GEM_NAME, ...]', 'Unstall a gem'
-    method_options "--dry-run"   => :boolean,
-                   "--force"     => :boolean
+    method_options "--dry-run" => :boolean
     def uninstall(*names)
       self.include_dependencies = true # deal with dependencies by default
       opts = { :version => options[:version] }
