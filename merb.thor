@@ -378,6 +378,18 @@ module MerbThorHelper
     Merb::Gem.ensure_bin_wrapper_for(gem_dir, bin_dir, *gems)
   end
   
+  def local_gemspecs(directory = gem_dir)
+    if File.directory?(specs_dir = File.join(directory, 'specifications'))
+      Dir[File.join(specs_dir, '*.gemspec')].map do |gemspec_path|
+        gemspec = Gem::Specification.load(gemspec_path)
+        gemspec.loaded_from = gemspec_path
+        gemspec
+      end
+    else
+      []
+    end
+  end
+  
 end
 
 ##############################################################################
@@ -545,6 +557,42 @@ module Merb
       clobber_dependencies!
     end
     
+    # This task should be executed as part of a deployment setup, where the 
+    # deployment system runs this after the app has been installed.
+    # Usually triggered by Capistrano, God...
+    #
+    # It will regenerate gems from the bundled gems cache for any gem that has 
+    # C extensions - which need to be recompiled for the target deployment platform.
+    #
+    # Note: gems/cache should be in your SCM for this to work correctly.
+    
+    desc 'redeploy', 'Recreate any binary gems on the target deployment platform'
+    method_options "--dry-run" => :boolean
+    def redeploy
+      require 'tempfile' # for Dir::tmpdir access
+      if gem_dir && File.directory?(cache_dir = File.join(gem_dir, 'cache'))
+        local_gemspecs.each do |gemspec|
+          unless gemspec.extensions.empty?
+            if File.exists?(gem_file = File.join(cache_dir, "#{gemspec.full_name}.gem"))
+              gem_file_copy = File.join(Dir::tmpdir, File.basename(gem_file))
+              if dry_run?
+                note "Recreating #{gemspec.full_name}"
+              else
+                message "Recreating #{gemspec.full_name}"
+                # Copy the gem to a temporary file, because otherwise RubyGems/FileUtils
+                # will complain about copying identical files (same source/destination).
+                FileUtils.cp(gem_file, gem_file_copy)
+                Merb::Gem.install(gem_file_copy, :install_dir => gem_dir)
+                File.delete(gem_file_copy)
+              end
+            end
+          end
+        end
+      else
+        error "No application local gems directory found"
+      end
+    end
+    
     # Create a dependencies configuration file.
     #
     # A configuration yaml file will be created from the extracted application
@@ -582,7 +630,7 @@ module Merb
       end
     rescue  
       error "Failed to write to #{config_file}"
-    end    
+    end 
     
     ### Helper Methods
     
@@ -739,7 +787,7 @@ module Merb
   class Stack < Thor
     
     include MerbThorHelper
-    
+
     MERB_CORE = %w[extlib merb-core]
     MERB_MORE = %w[
       merb-action-args merb-assets merb-gen merb-haml
