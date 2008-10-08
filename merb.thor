@@ -29,6 +29,10 @@ module ColorfulMessages
     puts messages.map { |msg| "\033[1;35m#{msg}\033[0m" }
   end
   
+  def info(*messages)
+    puts messages.map { |msg| "\033[1;34m#{msg}\033[0m" }
+  end
+  
 end
 
 ##############################################################################
@@ -344,6 +348,13 @@ module MerbThorHelper
   # The current working directory, or Merb app root (--merb-root option).
   def working_dir
     @_working_dir ||= File.expand_path(options['merb-root'] || Dir.pwd)
+  end
+  
+  # We should have a ./src dir for local and system-wide management.
+  def source_dir
+    @_source_dir  ||= File.join(working_dir, 'src')
+    create_if_missing(@_source_dir)
+    @_source_dir
   end
   
   # If a local ./gems dir is found, return it.
@@ -742,8 +753,114 @@ module Merb
     end
     
     def edge_strategy(deps)
-      # TODO
-      p deps
+      if core = deps.find { |d| d.name == 'merb-core' }
+        if dry_run?
+          note "Installing #{core.name}..."
+        else
+          if install_dependency_from_source(core)
+          elsif install_dependency(dependency)
+            info "Installed #{core.name} from rubygems..."
+          end
+        end
+      end
+      
+      deps.each do |dependency|
+        next if dependency.name == 'merb-core'
+        if dry_run?
+          note "Installing #{dependency.name}..."
+        else
+          if install_dependency_from_source(dependency)
+          elsif install_dependency(dependency)
+            info "Installed #{dependency.name} from rubygems..."
+          end
+        end        
+      end
+    end
+    
+    def install_dependency_from_source(dependency)
+      if repo_url = Merb::Source.repo(dependency.name, options[:sources])
+        # A repository entry for this dependency exists
+        repository_path = dependency.name
+        repository_name = dependency.name
+        repository_url  = repo_url       
+      elsif (stack_name = Merb::Stack.lookup_component(dependency.name)) &&
+        (repo_url = Merb::Source.repo(stack_name, options[:sources]))
+        # A parent repository entry for this dependency exists
+        puts "Found #{stack_name}/#{dependency.name} at #{repo_url}"
+        repository_path = File.join(stack_name, dependency.name)
+        repository_name = stack_name
+        repository_url  = repo_url        
+      end
+      
+      if repository_name && repository_url
+        result = if File.directory?(repository_dir = File.join(source_dir, repository_name))
+          message "Updating or branching #{repository_name}..."
+          update(repository_name, repository_url)
+        else
+          message "Cloning #{repository_name} repository from #{repository_url}..."
+          clone(repository_name, repository_url)
+        end
+        if result && File.directory?(gem_src_dir = File.join(source_dir, repository_path))
+          begin
+            Merb::Gem.install_gem_from_src(gem_src_dir, default_install_options)
+            puts "Installed #{repository_path}"
+            return true
+          rescue => e
+            error "TODO #{e.message}"
+          end
+        else
+          error "TODO #{gem_src_dir}"
+        end
+      end
+      return false
+    end
+    
+    def clone(name, url)
+      FileUtils.cd(source_dir) do
+        Kernel.system("git clone --depth 1 #{url} #{name}")
+      end
+    rescue => e
+      error "TODO #{e.message}"
+    end
+    
+    def update(name, url)
+      if File.directory?(repository_dir = File.join(source_dir, name))
+        FileUtils.cd(repository_dir) do
+          repos = existing_repos(name)
+          fork_name = url[/.com\/+?(.+)\/.+\.git/u, 1]
+          if url == repos["origin"]
+            # Pull from the original repository - no branching needed
+            info "Pulling from origin: #{url}"
+            Kernel.system "git fetch; git checkout master; git rebase origin/master"
+          elsif repos.values.include?(url) && fork_name
+            # Update and switch to a remote branch for a particular github fork
+            info "Switching to remote branch: #{fork_name}"
+            Kernel.system "git checkout -b #{fork_name} #{fork_name}/master"   
+            Kernel.system "git rebase #{fork_name}/master"
+          elsif fork_name
+            # Create a new remote branch for a particular github fork
+            info "Adding a new remote branch: #{fork_name}"
+            Kernel.system "git remote add -f #{fork_name} #{url}"
+            Kernel.system "git checkout -b #{fork_name} #{fork_name}/master"
+          else
+            warning "No valid repository found for: #{name}"
+          end
+        end
+        return true
+      else
+        warning "No valid repository found at: #{repository_dir}"
+      end
+    rescue => e
+      error "TODO #{e.message}"
+      return false
+    end
+    
+    def existing_repos(name)
+      repos = []
+      FileUtils.cd(File.join(source_dir, name)) do
+        repos = %x[git remote -v].split("\n").map { |branch| branch.split(/\s+/) }
+      end
+      Hash[*repos.flatten]
     end
     
     ### Class Methods
@@ -786,8 +903,6 @@ module Merb
   
   class Stack < Thor
     
-    include MerbThorHelper
-
     MERB_CORE = %w[extlib merb-core]
     MERB_MORE = %w[
       merb-action-args merb-assets merb-gen merb-haml
@@ -801,29 +916,65 @@ module Merb
     DM_CORE = %w[dm-core]
     DM_MORE = %w[merb_datamapper]
     
-    # global_method_options = {
-    #   "--merb-root"            => :optional,  # the directory to operate on
-    #   "--include-dependencies" => :boolean,   # gather sub-dependencies
-    #   "--stack"                => :boolean,   # gather only stack dependencies
-    #   "--no-stack"             => :boolean,   # gather only non-stack dependencies
-    #   "--version"              => :optional   # gather specific version of framework
-    # }
+    attr_accessor :system, :local, :missing
     
-    # method_options global_method_options
+    include MerbThorHelper
+    
+    global_method_options = {
+      "--merb-root"            => :optional,  # the directory to operate on
+      "--include-dependencies" => :boolean,   # gather sub-dependencies
+      "--stack"                => :boolean,   # gather only stack dependencies
+      "--no-stack"             => :boolean,   # gather only non-stack dependencies
+      "--config"               => :boolean,   # gather dependencies from yaml config
+      "--config-file"          => :optional,  # gather from the specified yaml config
+      "--version"              => :optional   # gather specific version of framework
+    }
+    
+    method_options global_method_options
     def initialize(*args); super; end
     
-    desc 'list [stable|edge]', 'Show framework dependencies'
-    def list
-      
-    end
-    
-    def install()
+    def install
       
     end
     
     def uninstall
       
     end    
+    
+    def self.framework_components
+      %w[merb-core merb-more merb-plugins].inject([]) do |all, comp| 
+        all + components(comp)
+      end
+    end
+    
+    def self.component_sets
+      @_component_sets ||= begin
+        comps = {}
+        comps["merb-core"]    = MERB_CORE
+        comps["merb-more"]    = MERB_MORE
+        comps["merb-plugins"] = MERB_PLUGINS
+        
+        comps["dm-core"]      = DM_CORE
+        comps["dm-more"]      = DM_MORE
+        comps
+      end
+    end
+    
+    def self.components(comp = nil)
+      if comp
+        component_sets[comp]
+      else
+        comps = %w[merb-core merb-more merb-plugins dm-core dm-more]
+        comps.inject([]) do |all, grp|
+          all + (component_sets[grp] || [])
+        end
+      end
+    end
+    
+    def self.select_component_dependencies(dependencies, comp = nil)
+      comps = components(comp) || []
+      dependencies.select { |dep| comps.include?(dep.name) }
+    end
     
     # Find the latest merb-core and gather its dependencies.
     # We check for 0.9.8 as a minimum release version.
@@ -843,36 +994,12 @@ module Merb
       end
     end
     
-    def self.framework_components
-      %w[merb-core merb-more merb-plugins].inject([]) do |all, comp| 
-        all + components(comp)
+    def self.lookup_component(item)
+      set_name = nil
+      self.component_sets.find do |set, items| 
+        items.include?(item) ? (set_name = set) : nil
       end
-    end
-    
-    def self.components(comp = nil)
-      @_components ||= begin
-        comps = {}
-        comps["merb-core"]    = MERB_CORE
-        comps["merb-more"]    = MERB_MORE
-        comps["merb-plugins"] = MERB_PLUGINS
-        
-        comps["dm-core"]      = DM_CORE
-        comps["dm-more"]      = DM_MORE
-        comps
-      end
-      if comp
-        @_components[comp]
-      else
-        comps = %w[merb-core merb-more merb-plugins dm-core dm-more]
-        comps.inject([]) do |all, grp|
-          all + (@_components[grp] || [])
-        end
-      end
-    end
-    
-    def self.select_component_dependencies(dependencies, comp = nil)
-      comps = components(comp) || []
-      dependencies.select { |dep| comps.include?(dep.name) }
+      set_name
     end
     
   end
@@ -1062,6 +1189,47 @@ module Merb
   
   class Source < Thor
     
+    # Default Git repositories
+    def self.default_repos
+      @_default_repos ||= { 
+        'merb-core'     => "git://github.com/wycats/merb-core.git",
+        'merb-more'     => "git://github.com/wycats/merb-more.git",
+        'merb-plugins'  => "git://github.com/wycats/merb-plugins.git",
+        'extlib'        => "git://github.com/sam/extlib.git",
+        'dm-core'       => "git://github.com/sam/dm-core.git",
+        'dm-more'       => "git://github.com/sam/dm-more.git",
+        'sequel'        => "git://github.com/wayneeseguin/sequel.git",
+        'do'            => "git://github.com/sam/do.git",
+        'thor'          => "git://github.com/wycats/thor.git",
+        'minigems'      => "git://github.com/fabien/minigems.git"
+      }
+    end
+
+    # Git repository sources - pass source_config option to load a yaml 
+    # configuration file - defaults to ./config/git-sources.yml and
+    # ~/.merb/git-sources.yml - which need to create yourself if desired. 
+    #
+    # Example of contents:
+    #
+    # merb-core: git://github.com/myfork/merb-core.git
+    # merb-more: git://github.com/myfork/merb-more.git
+    def self.repos(source_config = nil)
+      source_config ||= begin
+        local_config = File.join(Dir.pwd, 'config', 'git-sources.yml')
+        user_config  = File.join(ENV["HOME"] || ENV["APPDATA"], '.merb', 'git-sources.yml')
+        File.exists?(local_config) ? local_config : user_config
+      end
+      if source_config && File.exists?(source_config)
+        default_repos.merge(YAML.load(File.read(source_config)))
+      else
+        default_repos
+      end
+    end
+    
+    def self.repo(name, source_config = nil)
+      self.repos(source_config)[name]
+    end
+    
     def list
       
     end
@@ -1073,7 +1241,19 @@ module Merb
     def uninstall
       
     end
-   
+    
+    def self.clone
+      
+    end
+    
+    def self.install
+      
+    end
+    
+    def self.uninstall
+      
+    end
+       
   end
   
 end
