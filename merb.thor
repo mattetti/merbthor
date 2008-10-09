@@ -308,6 +308,68 @@ end
 
 ##############################################################################
 
+class SourceManager
+  
+  include ColorfulMessages
+  
+  attr_accessor :source_dir
+  
+  def initialize(source_dir)
+    self.source_dir = source_dir
+  end
+  
+  def clone(name, url)
+    FileUtils.cd(source_dir) do
+      system("git clone --depth 1 #{url} #{name}")
+    end
+  rescue => e
+    error "Unable to clone #{name} repository (#{e.message})"
+  end
+  
+  def update(name, url)
+    if File.directory?(repository_dir = File.join(source_dir, name))
+      FileUtils.cd(repository_dir) do
+        repos = existing_repos(name)
+        fork_name = url[/.com\/+?(.+)\/.+\.git/u, 1]
+        if url == repos["origin"]
+          # Pull from the original repository - no branching needed
+          info "Pulling from origin: #{url}"
+          system "git fetch; git checkout master; git rebase origin/master"
+        elsif repos.values.include?(url) && fork_name
+          # Update and switch to a remote branch for a particular github fork
+          info "Switching to remote branch: #{fork_name}"
+          system "git checkout -b #{fork_name} #{fork_name}/master"   
+          system "git rebase #{fork_name}/master"
+        elsif fork_name
+          # Create a new remote branch for a particular github fork
+          info "Adding a new remote branch: #{fork_name}"
+          system "git remote add -f #{fork_name} #{url}"
+          system "git checkout -b #{fork_name} #{fork_name}/master"
+        else
+          warning "No valid repository found for: #{name}"
+        end
+      end
+      return true
+    else
+      warning "No valid repository found at: #{repository_dir}"
+    end
+  rescue => e
+    error "Unable to update #{name} repository (#{e.message})"
+    return false
+  end
+  
+  def existing_repos(name)
+    repos = []
+    FileUtils.cd(File.join(source_dir, name)) do
+      repos = %x[git remote -v].split("\n").map { |branch| branch.split(/\s+/) }
+    end
+    Hash[*repos.flatten]
+  end
+  
+end
+
+##############################################################################
+
 module MerbThorHelper
   
   attr_accessor :include_dependencies
@@ -315,6 +377,77 @@ module MerbThorHelper
   def self.included(base)
     base.send(:include, ColorfulMessages)
     base.extend ColorfulMessages
+  end
+
+  def install_dependency(dependency)
+    v = dependency.version_requirements.to_s
+    Merb::Gem.install(dependency.name, default_install_options.merge(:version => v))
+  end
+  
+  def source_manager
+    @_source_manager ||= SourceManager.new(source_dir)
+  end
+  
+  def install_dependency_from_source(dependency)
+    if repo_url = Merb::Source.repo(dependency.name, options[:sources])
+      # A repository entry for this dependency exists
+      repository_path = dependency.name
+      repository_name = dependency.name
+      repository_url  = repo_url       
+    elsif (stack_name = Merb::Stack.lookup_component(dependency.name)) &&
+      (repo_url = Merb::Source.repo(stack_name, options[:sources]))
+      # A parent repository entry for this dependency exists
+      puts "Found #{stack_name}/#{dependency.name} at #{repo_url}"
+      repository_path = File.join(stack_name, dependency.name)
+      repository_name = stack_name
+      repository_url  = repo_url        
+    end
+    
+    if repository_name && repository_url
+      result = if File.directory?(repository_dir = File.join(source_dir, repository_name))
+        message "Updating or branching #{repository_name}..."
+        source_manager.update(repository_name, repository_url)
+      else
+        message "Cloning #{repository_name} repository from #{repository_url}..."
+        source_manager.clone(repository_name, repository_url)
+      end
+      if result && File.directory?(gem_src_dir = File.join(source_dir, repository_path))
+        begin
+          Merb::Gem.install_gem_from_src(gem_src_dir, default_install_options)
+          puts "Installed #{repository_path}"
+          return true
+        rescue => e
+          warning "Unable to install #{dependency.name} from source (#{e.message})"
+        end
+      else
+        msg = "Unknown subdirectory: #{repository_path}"
+        warning "Unable to install #{dependency.name} from source (#{msg})"
+      end
+    end
+    return false
+  end
+  
+  def clobber_dependencies!
+    if options[:force] && gem_dir && File.directory?(gem_dir)
+      # Remove all existing local gems by clearing the gems directory
+      if dry_run?
+        note 'Clearing existing local gems...'
+      else
+        message 'Clearing existing local gems...'
+        FileUtils.rm_rf(gem_dir) && FileUtils.mkdir_p(default_gem_dir)
+      end
+    elsif !local.empty? 
+      # Uninstall all local versions of the gems to install
+      if dry_run?
+        note 'Uninstalling existing local gems:'
+        local.each { |gemspec| note "Uninstalled #{gemspec.name}" }
+      else
+        message 'Uninstalling existing local gems:' 
+        local.each do |gemspec|
+          Merb::Gem.uninstall(gemspec.name, default_uninstall_options)
+        end
+      end
+    end
   end
     
   def display_gemspecs(gemspecs)
@@ -403,7 +536,6 @@ module MerbThorHelper
   
 end
 
-##############################################################################
 ##############################################################################
 
 module Merb
@@ -701,34 +833,6 @@ module Merb
       File.dirname(config_file)
     end
     
-    def install_dependency(dependency)
-      v = dependency.version_requirements.to_s
-      Merb::Gem.install(dependency.name, default_install_options.merge(:version => v))
-    end
-    
-    def clobber_dependencies!
-      if options[:force] && gem_dir && File.directory?(gem_dir)
-        # Remove all existing local gems by clearing the gems directory
-        if dry_run?
-          note 'Clearing existing local gems...'
-        else
-          message 'Clearing existing local gems...'
-          FileUtils.rm_rf(gem_dir) && FileUtils.mkdir_p(default_gem_dir)
-        end
-      elsif !local.empty? 
-        # Uninstall all local versions of the gems to install
-        if dry_run?
-          note 'Uninstalling existing local gems:'
-          local.each { |gemspec| note "Uninstalled #{gemspec.name}" }
-        else
-          message 'Uninstalling existing local gems:' 
-          local.each do |gemspec|
-            Merb::Gem.uninstall(gemspec.name, default_uninstall_options)
-          end
-        end
-      end
-    end
-    
     ### Strategy handlers
     
     private
@@ -738,7 +842,17 @@ module Merb
         if dry_run?
           note "Installing #{core.name}..."
         else
-          install_dependency(core)
+          unless install_dependency(core)
+            msg = "Try specifying a lower version of merb-core with --version"
+            if version_no = core.version_requirements.to_s[/([\.\d]+)$/, 1]
+              num = "%03d" % (version_no.gsub('.', '').to_i - 1)
+              puts "The required version (#{version_no}) probably isn't available as a stable rubygem yet."
+              info "#{msg} #{num.split(//).join('.')}"
+            else
+              puts "The required version probably isn't available as a stable rubygem yet."
+              info msg
+            end           
+          end
         end
       end
       
@@ -775,92 +889,6 @@ module Merb
           end
         end        
       end
-    end
-    
-    def install_dependency_from_source(dependency)
-      if repo_url = Merb::Source.repo(dependency.name, options[:sources])
-        # A repository entry for this dependency exists
-        repository_path = dependency.name
-        repository_name = dependency.name
-        repository_url  = repo_url       
-      elsif (stack_name = Merb::Stack.lookup_component(dependency.name)) &&
-        (repo_url = Merb::Source.repo(stack_name, options[:sources]))
-        # A parent repository entry for this dependency exists
-        puts "Found #{stack_name}/#{dependency.name} at #{repo_url}"
-        repository_path = File.join(stack_name, dependency.name)
-        repository_name = stack_name
-        repository_url  = repo_url        
-      end
-      
-      if repository_name && repository_url
-        result = if File.directory?(repository_dir = File.join(source_dir, repository_name))
-          message "Updating or branching #{repository_name}..."
-          update(repository_name, repository_url)
-        else
-          message "Cloning #{repository_name} repository from #{repository_url}..."
-          clone(repository_name, repository_url)
-        end
-        if result && File.directory?(gem_src_dir = File.join(source_dir, repository_path))
-          begin
-            Merb::Gem.install_gem_from_src(gem_src_dir, default_install_options)
-            puts "Installed #{repository_path}"
-            return true
-          rescue => e
-            error "TODO #{e.message}"
-          end
-        else
-          error "TODO #{gem_src_dir}"
-        end
-      end
-      return false
-    end
-    
-    def clone(name, url)
-      FileUtils.cd(source_dir) do
-        Kernel.system("git clone --depth 1 #{url} #{name}")
-      end
-    rescue => e
-      error "TODO #{e.message}"
-    end
-    
-    def update(name, url)
-      if File.directory?(repository_dir = File.join(source_dir, name))
-        FileUtils.cd(repository_dir) do
-          repos = existing_repos(name)
-          fork_name = url[/.com\/+?(.+)\/.+\.git/u, 1]
-          if url == repos["origin"]
-            # Pull from the original repository - no branching needed
-            info "Pulling from origin: #{url}"
-            Kernel.system "git fetch; git checkout master; git rebase origin/master"
-          elsif repos.values.include?(url) && fork_name
-            # Update and switch to a remote branch for a particular github fork
-            info "Switching to remote branch: #{fork_name}"
-            Kernel.system "git checkout -b #{fork_name} #{fork_name}/master"   
-            Kernel.system "git rebase #{fork_name}/master"
-          elsif fork_name
-            # Create a new remote branch for a particular github fork
-            info "Adding a new remote branch: #{fork_name}"
-            Kernel.system "git remote add -f #{fork_name} #{url}"
-            Kernel.system "git checkout -b #{fork_name} #{fork_name}/master"
-          else
-            warning "No valid repository found for: #{name}"
-          end
-        end
-        return true
-      else
-        warning "No valid repository found at: #{repository_dir}"
-      end
-    rescue => e
-      error "TODO #{e.message}"
-      return false
-    end
-    
-    def existing_repos(name)
-      repos = []
-      FileUtils.cd(File.join(source_dir, name)) do
-        repos = %x[git remote -v].split("\n").map { |branch| branch.split(/\s+/) }
-      end
-      Hash[*repos.flatten]
     end
     
     ### Class Methods
@@ -1256,8 +1284,4 @@ module Merb
        
   end
   
-end
-
-module DataMapper
-    
 end
