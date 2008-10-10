@@ -379,16 +379,16 @@ module MerbThorHelper
     base.extend ColorfulMessages
   end
 
-  def install_dependency(dependency)
-    v = dependency.version_requirements.to_s
-    Merb::Gem.install(dependency.name, default_install_options.merge(:version => v))
+  def install_dependency(dependency, opts = {})
+    opts[:version] ||= dependency.version_requirements.to_s
+    Merb::Gem.install(dependency.name, default_install_options.merge(opts))
   end
   
   def source_manager
     @_source_manager ||= SourceManager.new(source_dir)
   end
   
-  def install_dependency_from_source(dependency)
+  def install_dependency_from_source(dependency, opts = {})
     if repo_url = Merb::Source.repo(dependency.name, options[:sources])
       # A repository entry for this dependency exists
       repository_path = dependency.name
@@ -410,10 +410,11 @@ module MerbThorHelper
       else
         message "Cloning #{repository_name} repository from #{repository_url}..."
         source_manager.clone(repository_name, repository_url)
+        sleep(1) # otherwise the following steps won't see the directory
       end
       if result && File.directory?(gem_src_dir = File.join(source_dir, repository_path))
         begin
-          Merb::Gem.install_gem_from_src(gem_src_dir, default_install_options)
+          Merb::Gem.install_gem_from_src(gem_src_dir, default_install_options.merge(opts))
           puts "Installed #{repository_path}"
           return true
         rescue => e
@@ -451,11 +452,19 @@ module MerbThorHelper
   end
     
   def display_gemspecs(gemspecs)
-    gemspecs.each { |spec| puts "- #{spec.full_name}" }
+    if gemspecs.empty?
+      puts "- none"
+    else
+      gemspecs.each { |spec| puts "- #{spec.full_name}" }
+    end
   end
   
   def display_dependencies(dependencies)
-    dependencies.each { |d| puts "- #{d.name} (#{d.version_requirements})" }
+    if dependencies.empty?
+      puts "- none"
+    else
+      dependencies.each { |d| puts "- #{d.name} (#{d.version_requirements})" }
+    end
   end
   
   def default_install_options
@@ -582,23 +591,36 @@ module Merb
       self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
       case filter
       when 'all'
-        message 'Installed system gem dependencies:'  unless system.empty? 
+        message 'Installed system gem dependencies:' 
         display_gemspecs(system)
-        message 'Installed local gem dependencies:'   unless local.empty? 
+        message 'Installed local gem dependencies:'
         display_gemspecs(local)
-        error 'Missing gem dependencies:'             unless missing.empty? 
-        display_dependencies(missing)
+        unless missing.empty?
+          error 'Missing gem dependencies:'
+          display_dependencies(missing)
+        end
       when 'system'
-        message 'Installed system gem dependencies:'  unless system.empty? 
+        message 'Installed system gem dependencies:'
         display_gemspecs(system)
       when 'local'
-        message 'Installed local gem dependencies:'   unless local.empty? 
+        message 'Installed local gem dependencies:'
         display_gemspecs(local)
       when 'missing'
-        error 'Missing gem dependencies:'             unless missing.empty? 
+        error 'Missing gem dependencies:'
         display_dependencies(missing)
       else
         warning "Invalid listing filter '#{filter}'"
+      end
+      if missing.size > 0
+        info "Some dependencies are currently missing!"
+      elsif local.size == deps.size
+        info "All dependencies have been bundled with the application."
+      elsif local.size > system.size
+        info "Most dependencies have been bundled with the application."
+      elsif system.size > 0 && local.size > 0
+        info "Some dependencies have been bundled with the application."  
+      elsif local.empty? && system.size == deps.size
+        info "All dependencies have been installed on the system."
       end
     end
     
@@ -867,12 +889,15 @@ module Merb
     end
     
     def edge_strategy(deps)
+      # Skip gem dependencies as they'll be retrieved from stable gems instead;
+      # however, core dependencies will be retrieved from source when available
+      install_opts = { :ignore_dependencies => true }
       if core = deps.find { |d| d.name == 'merb-core' }
         if dry_run?
           note "Installing #{core.name}..."
         else
-          if install_dependency_from_source(core)
-          elsif install_dependency(dependency)
+          if install_dependency_from_source(core, install_opts)
+          elsif install_dependency(dependency, install_opts)
             info "Installed #{core.name} from rubygems..."
           end
         end
@@ -883,8 +908,8 @@ module Merb
         if dry_run?
           note "Installing #{dependency.name}..."
         else
-          if install_dependency_from_source(dependency)
-          elsif install_dependency(dependency)
+          if install_dependency_from_source(dependency, install_opts)
+          elsif install_dependency(dependency, install_opts)
             info "Installed #{dependency.name} from rubygems..."
           end
         end        
@@ -899,15 +924,19 @@ module Merb
     def self.extract_dependencies(merb_root)
       FileUtils.cd(merb_root) do
         cmd = ["require 'yaml';"]
+        cmd << "begin"
         cmd << "dependencies = Merb::BootLoader::Dependencies.dependencies"
         cmd << "entries = dependencies.map { |d| d.to_s }"
         cmd << "puts YAML.dump(entries)"
+        cmd << "rescue"
+        cmd << "end"
         output = `merb -r "#{cmd.join("\n")}"`
         if index = (lines = output.split(/\n/)).index('--- ')
           yaml = lines.slice(index, lines.length - 1).join("\n")
           return parse_dependencies_yaml(yaml)
         end
       end
+      error "Couldn't extract dependencies from application!"
       return []
     end
     
@@ -931,7 +960,7 @@ module Merb
   
   class Stack < Thor
     
-    MERB_CORE = %w[extlib merb-core]
+    MERB_CORE = %w[merb-core]
     MERB_MORE = %w[
       merb-action-args merb-assets merb-gen merb-haml
       merb-builder merb-mailer merb-parts merb-cache 
@@ -1075,15 +1104,15 @@ module Merb
       self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
       case filter
       when 'all'
-        message 'Installed system gems:'  unless system.empty? 
+        message 'Installed system gems:'
         display_gemspecs(system)
-        message 'Installed local gems:'   unless local.empty? 
+        message 'Installed local gems:'
         display_gemspecs(local)
       when 'system'
-        message 'Installed system gems:'  unless system.empty? 
+        message 'Installed system gems:'
         display_gemspecs(system)
       when 'local'
-        message 'Installed local gems:'   unless local.empty? 
+        message 'Installed local gems:'
         display_gemspecs(local)
       else
         warning "Invalid listing filter '#{filter}'"
@@ -1216,23 +1245,75 @@ module Merb
   end
   
   class Source < Thor
+        
+    include MerbThorHelper
+    extend GemManagement
     
-    # Default Git repositories
-    def self.default_repos
-      @_default_repos ||= { 
-        'merb-core'     => "git://github.com/wycats/merb-core.git",
-        'merb-more'     => "git://github.com/wycats/merb-more.git",
-        'merb-plugins'  => "git://github.com/wycats/merb-plugins.git",
-        'extlib'        => "git://github.com/sam/extlib.git",
-        'dm-core'       => "git://github.com/sam/dm-core.git",
-        'dm-more'       => "git://github.com/sam/dm-more.git",
-        'sequel'        => "git://github.com/wayneeseguin/sequel.git",
-        'do'            => "git://github.com/sam/do.git",
-        'thor'          => "git://github.com/wycats/thor.git",
-        'minigems'      => "git://github.com/fabien/minigems.git"
-      }
+    attr_accessor :system, :local, :missing
+    
+    global_method_options = {
+      "--merb-root"            => :optional   # the directory to operate on
+    }
+    
+    method_options global_method_options
+    def initialize(*args); super; end
+    
+    # # # List gems that match the specified criteria.
+    # # # 
+    # # # By default all local gems are listed. When the first argument is 'all' the
+    # # # list is partitioned into system an local gems; specify 'system' to show
+    # # # only system gems. A second argument can be used to filter on a set of known
+    # # # components, like all merb-more gems for example.
+    # # # 
+    # # # Examples:
+    # # # 
+    # # # merb:gem:list                                    # list all local gems - the default
+    # # # merb:gem:list all                                # list system and local gems
+    # # # merb:gem:list system                             # list only system gems
+    # # # merb:gem:list all merb-more                      # list only merb-more related gems
+    # # # merb:gem:list --version 0.9.8                    # list gems that match the version    
+       
+    desc 'list [comp]', 'Show current gem sources'
+    def list(comp = nil)
+      # deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
+      # self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
+      # case filter
+      # when 'all'
+      #   message 'Installed system gems:'  unless system.empty? 
+      #   display_gemspecs(system)
+      #   message 'Installed local gems:'   unless local.empty? 
+      #   display_gemspecs(local)
+      # when 'system'
+      #   message 'Installed system gems:'  unless system.empty? 
+      #   display_gemspecs(system)
+      # when 'local'
+      #   message 'Installed local gems:'   unless local.empty? 
+      #   display_gemspecs(local)
+      # else
+      #   warning "Invalid listing filter '#{filter}'"
+      # end
     end
 
+    def install
+      
+    end
+    
+    def uninstall
+      
+    end
+    
+    def self.clone
+      
+    end
+    
+    def self.install
+      
+    end
+    
+    def self.uninstall
+      
+    end
+    
     # Git repository sources - pass source_config option to load a yaml 
     # configuration file - defaults to ./config/git-sources.yml and
     # ~/.merb/git-sources.yml - which need to create yourself if desired. 
@@ -1258,28 +1339,20 @@ module Merb
       self.repos(source_config)[name]
     end
     
-    def list
-      
-    end
-
-    def install
-      
-    end
-    
-    def uninstall
-      
-    end
-    
-    def self.clone
-      
-    end
-    
-    def self.install
-      
-    end
-    
-    def self.uninstall
-      
+    # Default Git repositories
+    def self.default_repos
+      @_default_repos ||= { 
+        'merb-core'     => "git://github.com/wycats/merb-core.git",
+        'merb-more'     => "git://github.com/wycats/merb-more.git",
+        'merb-plugins'  => "git://github.com/wycats/merb-plugins.git",
+        'extlib'        => "git://github.com/sam/extlib.git",
+        'dm-core'       => "git://github.com/sam/dm-core.git",
+        'dm-more'       => "git://github.com/sam/dm-more.git",
+        'sequel'        => "git://github.com/wayneeseguin/sequel.git",
+        'do'            => "git://github.com/sam/do.git",
+        'thor'          => "git://github.com/wycats/thor.git",
+        'minigems'      => "git://github.com/fabien/minigems.git"
+      }
     end
        
   end
