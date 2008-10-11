@@ -87,7 +87,7 @@ module GemManagement
         exception = e
       end
       if installer.installed_gems.empty? && exception
-        error "Failed to install gem '#{gem} (#{version})' (#{exception.message})"
+        error "Failed to install gem '#{gem} (#{version || 'any version'})' (#{exception.message})"
       end
       installer.installed_gems.each do |spec|
         success "Successfully installed #{spec.full_name}"
@@ -165,13 +165,13 @@ module GemManagement
         if opts[:ignore_dependencies]
           refresh.each do |name| 
             gem_pkg = Dir[File.join(gem_pkg_dir, "#{name}-*.gem")][0]
-            install_package(gem_pkg, opts)
+            install_pkg(gem_pkg, opts)
           end
         end
       end
       
       # Finally install the main gem
-      if install_package(Dir[gem_pkg_glob][0], opts.merge(:refresh => refresh))
+      if install_pkg(Dir[gem_pkg_glob][0], opts.merge(:refresh => refresh))
         installed_gems = refresh
       else
         installed_gems = []
@@ -180,7 +180,7 @@ module GemManagement
     installed_gems
   end
   
-  def install_package(gem_pkg, opts = {})
+  def install_pkg(gem_pkg, opts = {})
     if (gem_pkg && File.exists?(gem_pkg))
       # Needs to be executed from the directory that contains all packages
       Dir.chdir(File.dirname(gem_pkg)) { install_gem(gem_pkg, opts) }
@@ -796,7 +796,7 @@ module Merb
     #
     # Note: gems/cache should be in your SCM for this to work correctly.
     
-    desc 'redeploy', 'Recreate any binary gems on the target deployment platform'
+    desc 'redeploy', 'Recreate any binary gems on the target platform'
     method_options "--dry-run" => :boolean
     def redeploy
       require 'tempfile' # for Dir::tmpdir access
