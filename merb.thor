@@ -438,7 +438,7 @@ module MerbThorHelper
   end
   
   def update_dependency_repositories(dependencies)
-    affected_repos = extract_dependency_repositories(dependencies)     
+    affected_repos = extract_dependency_repositories(dependencies)
     affected_repos.each do |(name, url)|
       if File.directory?(repository_dir = File.join(source_dir, name))
         message "Updating or branching #{name}..."
@@ -768,7 +768,7 @@ module Merb
     # can be used to filter on a set of known components.
     #
     # Existing dependencies will be clobbered; when :force => true then all gems
-    # will be cleared , otherwise only existing local dependencies of the
+    # will be cleared, otherwise only existing local dependencies of the
     # matching component set will be removed.
     #
     # Examples:
@@ -1052,9 +1052,10 @@ module Merb
     
     MERB_CORE = %w[merb-core]
     MERB_MORE = %w[
-      merb-action-args merb-auth merb-assets merb-gen merb-haml
+      merb-action-args merb-assets merb-gen merb-haml
       merb-builder merb-mailer merb-parts merb-cache 
       merb-slices merb-jquery merb-helpers merb_datamapper
+      merb-auth merb-auth-core merb-auth-more merb-auth-slice-password
     ]
     MERB_PLUGINS = %w[
       merb_activerecord merb_sequel merb_param_protection 
@@ -1080,13 +1081,17 @@ module Merb
     method_options global_method_options
     def initialize(*args); super; end
     
-    def install
-      
-    end
+    # def list
+    #
+    # end
     
-    def uninstall
-      
-    end    
+    # def install
+    #   
+    # end
+    # 
+    # def uninstall
+    #   
+    # end
     
     def self.framework_components
       %w[merb-core merb-more merb-plugins].inject([]) do |all, comp| 
@@ -1151,13 +1156,14 @@ module Merb
     
   end
   
-  class Util < Thor
-    
+  class Util < Thor    
   end
   
   #### RAW TASKS ####
   
   class Gem < Thor
+    
+    group 'advanced'
     
     include MerbThorHelper
     extend GemManagement
@@ -1221,11 +1227,11 @@ module Merb
     # 
     # Examples:
     #
-    # merb:gems:install merb-core merb-slices          # install all specified gems
-    # merb:gems:install merb-core --version 0.9.8      # install a specific version of a gem
-    # merb:gems:install merb-core --force              # uninstall then subsequently install the gem
-    # merb:gems:install merb-core --cache              # try to install locally from system gems
-    # merb:gems:install merb-core --binaries           # also install adapted bin wrapper
+    # merb:gem:install merb-core merb-slices          # install all specified gems
+    # merb:gem:install merb-core --version 0.9.8      # install a specific version of a gem
+    # merb:gem:install merb-core --force              # uninstall then subsequently install the gem
+    # merb:gem:install merb-core --cache              # try to install locally from system gems
+    # merb:gem:install merb-core --binaries           # also install adapted bin wrapper
      
     desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from rubygems'
     method_options "--cache"     => :boolean,
@@ -1262,13 +1268,13 @@ module Merb
     # will install all contained gems: merb-action-args, merb-assets, ...
     #
     # Existing dependencies will be clobbered; when :force => true then all gems
-    # will be cleared , otherwise only existing local dependencies of the
+    # will be cleared, otherwise only existing local dependencies of the
     # matching component set will be removed.
     #
     # Examples:
     #
-    # merb:gem:uninstall merb-core merb-slices         # uninstall all specified gems
-    # merb:gems:install merb-core --version 0.9.8      # uninstall a specific version of a gem
+    # merb:gem:uninstall merb-core merb-slices        # uninstall all specified gems
+    # merb:gem:uninstall merb-core --version 0.9.8    # uninstall a specific version of a gem
     
     desc 'uninstall GEM_NAME [GEM_NAME, ...]', 'Unstall a gem'
     method_options "--dry-run" => :boolean
@@ -1335,6 +1341,8 @@ module Merb
   end
   
   class Source < Thor
+    
+    group 'advanced'
         
     include MerbThorHelper
     extend GemManagement
@@ -1342,68 +1350,134 @@ module Merb
     attr_accessor :system, :local, :missing
     
     global_method_options = {
-      "--merb-root"            => :optional   # the directory to operate on
+      "--merb-root"            => :optional,  # the directory to operate on
+      "--include-dependencies" => :boolean,   # gather sub-dependencies
+      "--sources"              => :optional   # a yml config to grab sources from
     }
     
     method_options global_method_options
     def initialize(*args); super; end
+        
+    # List source repositories, of either local or known sources.
+    #
+    # Examples:
+    #
+    # merb:source:list                                   # list all local sources
+    # merb:source:list available                         # list all known sources
     
-    # # # List gems that match the specified criteria.
-    # # # 
-    # # # By default all local gems are listed. When the first argument is 'all' the
-    # # # list is partitioned into system an local gems; specify 'system' to show
-    # # # only system gems. A second argument can be used to filter on a set of known
-    # # # components, like all merb-more gems for example.
-    # # # 
-    # # # Examples:
-    # # # 
-    # # # merb:gem:list                                    # list all local gems - the default
-    # # # merb:gem:list all                                # list system and local gems
-    # # # merb:gem:list system                             # list only system gems
-    # # # merb:gem:list all merb-more                      # list only merb-more related gems
-    # # # merb:gem:list --version 0.9.8                    # list gems that match the version    
-       
-    desc 'list [comp]', 'Show current gem sources'
-    def list(comp = nil)
-      # deps = comp ? Merb::Stack.select_component_dependencies(dependencies, comp) : dependencies
-      # self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
-      # case filter
-      # when 'all'
-      #   message 'Installed system gems:'  unless system.empty? 
-      #   display_gemspecs(system)
-      #   message 'Installed local gems:'   unless local.empty? 
-      #   display_gemspecs(local)
-      # when 'system'
-      #   message 'Installed system gems:'  unless system.empty? 
-      #   display_gemspecs(system)
-      # when 'local'
-      #   message 'Installed local gems:'   unless local.empty? 
-      #   display_gemspecs(local)
-      # else
-      #   warning "Invalid listing filter '#{filter}'"
-      # end
+    desc 'list [local|available]', 'Show source repositories'
+    def list(mode = 'local')
+      if mode == 'available'
+        message 'Available source repositories:'
+        repos = self.class.repos(options[:sources])
+        repos.keys.sort.each { |name| puts "- #{name}: #{repos[name]}" }
+      elsif mode == 'local'
+        message 'Current source repositories:'
+        Dir[File.join(source_dir, '*')].each do |src|
+          next unless File.directory?(src)
+          src_name = File.basename(src)
+          unless (repos = source_manager.existing_repos(src_name)).empty?
+            puts "#{src_name}"
+            repos.keys.sort.each { |b| puts "- #{b}: #{repos[b]}" }
+          end
+        end
+      else
+        error "Unknown listing: #{mode}"
+      end
     end
 
-    def install
+    # Install the specified gems.
+    #
+    # All arguments should be names of gems to install.
+    #
+    # When :force => true then any existing versions of the gems to be installed
+    # will be uninstalled first. It's important to note that so-called meta-gems
+    # or gems that exactly match a set of Merb::Stack.components will have their
+    # sub-gems uninstalled too. For example, uninstalling merb-more will install
+    # all contained gems: merb-action-args, merb-assets, merb-gen, ...
+    # 
+    # Examples:
+    #
+    # merb:source:install merb-core merb-slices          # install all specified gems
+    # merb:source:install merb-core --force              # uninstall then subsequently install the gem
+    # merb:source:install merb-core --wipe               # clear repo then install the gem
+    # merb:source:install merb-core --binaries           # also install adapted bin wrapper
+
+    desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from source/edge'
+    method_options "--binaries"  => :boolean,
+                   "--dry-run"   => :boolean,
+                   "--force"     => :boolean,
+                   "--wipe"      => :boolean
+    def install(*names)
+      # uninstall existing gems of the ones we're going to install
+      uninstall(*names) if options[:force] || options[:wipe]
       
+      # We want dependencies instead of just names
+      deps = names.map { |n| ::Gem::Dependency.new(n, ::Gem::Requirement.default) }
+      
+      # Selectively update repositories for the matching dependencies
+      update_dependency_repositories(deps) unless dry_run?
+      
+      current_gem = nil
+      deps.each do |dependency|
+        current_gem = dependency.name      
+        if dry_run?
+          note "Installing #{current_gem} from source..."
+        else
+          message "Installing #{current_gem} from source..."
+          if install_dependency_from_source(dependency)
+            ensure_bin_wrapper_for(dependency.name) if options[:binaries]
+          end
+        end
+      end
+    rescue => e
+      error "Failed to install #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
-    def uninstall
-      
+    def clone
     end
     
-    def self.clone
-      
-    end
+    # Uninstall the specified gems.
+    #
+    # By default all specified gems are uninstalled. It's important to note that 
+    # so-called meta-gems or gems that match a set of Merb::Stack.components will 
+    # have their sub-gems uninstalled too. For example, uninstalling merb-more 
+    # will install all contained gems: merb-action-args, merb-assets, ...
+    #
+    # Existing dependencies will be clobbered; when :force => true then all gems
+    # will be cleared, otherwise only existing local dependencies of the
+    # matching component set will be removed. Additionally when :wipe => true, 
+    # the matching git repositories will be removed from the source directory.
+    #
+    # Examples:
+    #
+    # merb:source:uninstall merb-core merb-slices       # uninstall all specified gems
+    # merb:source:uninstall merb-core --wipe            # force-uninstall a gem and clear repo
     
-    def self.install
+    desc 'uninstall GEM_NAME [GEM_NAME, ...]', 'Unstall a gem (specify --force to remove the repo)'
+    method_options "--version" => :optional, "--dry-run" => :boolean, "--wipe" => :boolean
+    def uninstall(*names)
+      # Remove the repos that contain the gem
+      if options[:wipe] 
+        deps = names.map { |n| ::Gem::Dependency.new(n, ::Gem::Requirement.default) }
+        extract_dependency_repositories(deps).each do |(name, url)|
+          if File.directory?(src = File.join(source_dir, name))
+            if dry_run?
+              note "Removing #{src}..."
+            else
+              info "Removing #{src}..."
+              FileUtils.rm_rf(src)
+            end
+          end
+        end
+      end
       
+      # Use the Merb::Gem#uninstall task to handle this
+      gem_tasks = Merb::Gem.new
+      gem_tasks.options = options
+      gem_tasks.uninstall(*names)
     end
-    
-    def self.uninstall
-      
-    end
-    
+        
     # Git repository sources - pass source_config option to load a yaml 
     # configuration file - defaults to ./config/git-sources.yml and
     # ~/.merb/git-sources.yml - which need to create yourself if desired. 
