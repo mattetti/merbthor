@@ -4,6 +4,9 @@ require 'thor'
 require 'fileutils'
 require 'yaml'
 
+# Important - don't change this line or its position
+MERB_THOR_VERSION = '0.0.5'
+
 ##############################################################################
 
 module ColorfulMessages
@@ -609,7 +612,7 @@ end
 $SILENT = true # don't output all the mess some rake package tasks spit out
 
 module Merb
-  
+    
   class Dependencies < Thor
     
     attr_accessor :system, :local, :missing
@@ -1110,19 +1113,22 @@ module Merb
     global_method_options = {
       "--merb-root"            => :optional,  # the directory to operate on
       "--include-dependencies" => :boolean,   # gather sub-dependencies
-      "--stack"                => :boolean,   # gather only stack dependencies
-      "--no-stack"             => :boolean,   # gather only non-stack dependencies
-      "--config"               => :boolean,   # gather dependencies from yaml config
-      "--config-file"          => :optional,  # gather from the specified yaml config
       "--version"              => :optional   # gather specific version of framework
     }
     
     method_options global_method_options
     def initialize(*args); super; end
     
-    # def list
-    #
-    # end
+  
+    
+    def list(comp = nil)
+      if comp
+        message "Dependencies for '#{comp}' set:"
+        p Merb::Stack.components(comp)
+      else
+        
+      end      
+    end
     
     # def install
     #   
@@ -1142,11 +1148,11 @@ module Merb
       @_component_sets ||= begin
         comps = { "thor" => ["thor"] }
         comps["merb-core"]    = MERB_CORE
-        comps["merb-more"]    = MERB_MORE
-        comps["merb-plugins"] = MERB_PLUGINS
+        comps["merb-more"]    = MERB_MORE.sort
+        comps["merb-plugins"] = MERB_PLUGINS.sort
         
-        comps["dm-core"]      = DM_CORE
-        comps["dm-more"]      = DM_MORE
+        comps["dm-core"]      = DM_CORE.sort
+        comps["dm-more"]      = DM_MORE.sort
         comps
       end
     end
@@ -1209,23 +1215,74 @@ module Merb
     
   end
   
-  # class Tasks < Thor
-  #   
-  #   desc 'update [URL]', 'Fetch the latest merb.thor and install it locally'
-  #   def update_tasks(url = 'http://merbivore.com/merb.thor')
-  #     require 'open-uri'
-  #     remote_file = open(url)
-  #     File.open(File.join(working_dir, 'merb.thor'), 'w') do |f|
-  #       f.write(remote_file.read)
-  #     end
-  #     success "Installed the latest merb.thor"
-  #   rescue OpenURI::HTTPError
-  #     error "Error opening #{url}"
-  #   rescue => e
-  #     error "An error occurred (#{e.message})"
-  #   end
-  #   
-  # end
+  class Tasks < Thor
+    
+    include MerbThorHelper
+    
+    # Show merb.thor version information
+    #
+    # merb:tasks:version                                        # show the current version info
+    # merb:tasks:version --info                                 # show extended version info
+    
+    desc 'version', 'Show verion info'
+    method_options "--info" => :boolean
+    def version
+      message "Currently installed merb.thor version: #{MERB_THOR_VERSION}"
+      if options[:version]
+        self.options = { :"dry-run" => true }
+        self.update # run update task with dry-run enabled
+      end
+    end
+    
+    # Update merb.thor tasks from remotely available version
+    #
+    # merb:tasks:update                                        # update merb.thor
+    # merb:tasks:update --force                                # force-update merb.thor
+    # merb:tasks:update --dry-run                              # show version info only
+    
+    desc 'update [URL]', 'Fetch the latest merb.thor and install it locally'
+    method_options "--dry-run" => :boolean, "--force" => :boolean
+    def update(url = 'http://merbivore.com/merb.thor')
+      require 'open-uri'
+      require 'rubygems/version'
+      remote_file = open('merb-newer.sample')
+      code = remote_file.read
+      
+      # Extract version information from the source code
+      if version = code[/^MERB_THOR_VERSION\s?=\s?('|")([\.\d]+)('|")/,2]
+        # borrow version comparison from rubygems' Version class
+        current_version = ::Gem::Version.new(MERB_THOR_VERSION)
+        remote_version  = ::Gem::Version.new(version)
+        
+        if current_version >= remote_version
+          puts "currently installed: #{current_version}"
+          if current_version != remote_version
+            puts "available version:   #{remote_version}"
+          end
+          info "No update of merb.thor necessary#{options[:force] ? ' (forced)' : ''}"
+          proceed = options[:force]
+        elsif current_version < remote_version
+          puts "currently installed: #{current_version}"
+          puts "available version:   #{remote_version}"
+          proceed = true
+        end
+          
+        if proceed && !dry_run?
+          File.open(File.join(working_dir, 'merb.thor'), 'w') do |f|
+            f.write(code)
+          end
+          success "Installed the latest merb.thor (v#{version})"
+        end
+      else
+        raise "invalid source-code data"
+      end      
+    rescue OpenURI::HTTPError
+      error "Error opening #{url}"
+    rescue => e
+      error "An error occurred (#{e.message})"
+    end
+    
+  end
   
   #### MORE LOW-LEVEL TASKS ####
   
@@ -1502,45 +1559,6 @@ module Merb
       error "Failed to install #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
-    # Update the specified source repositories.
-    #
-    # The arguments can be actual repository names (from Merb::Source.repos)
-    # or names of known merb stack gems. If the repo doesn't exist already,
-    # it will be created and cloned.
-    #
-    # merb:source:pull merb-core                         # update source of specified gem
-    # merb:source:pull merb-slices                       # implicitly updates merb-more
-    
-    desc 'pull REPO_NAME [GEM_NAME, ...]', 'Update git source repository from edge'
-    def pull(*names)
-      repos = extract_repositories(names)
-      update_repositories(repos)
-      message "Updated the following repositories:"
-      repos.each { |name, url| puts "- #{name}: #{url}" }
-    end    
-    
-    # Clone a git repository into ./src. The repository can be a direct git url 
-    # or a known -named- repository.
-    #
-    # Examples:
-    #
-    # thor merb:source:clone merb-core 
-    # thor merb:source:clone dm-core awesome-repo
-    # thor merb:source:clone dm-core --sources ./path/to/sources.yml
-    # thor merb:source:clone git://github.com/sam/dm-core.git
-    
-    desc 'clone (REPO_NAME|URL) [DIR_NAME]', 'Clone git source repository by name or url'
-    def clone(repository, name = nil)
-      if repository =~ /^git:\/\//
-        repository_url  = repository
-        repository_name = File.basename(repository_url, '.git')
-      elsif url = Merb::Source.repo(repository, options[:sources])
-        repository_url = url
-        repository_name = repository
-      end
-      source_manager.clone(name || repository_name, repository_url)
-    end
-    
     # Uninstall the specified gems.
     #
     # By default all specified gems are uninstalled. It's important to note that 
@@ -1580,7 +1598,50 @@ module Merb
       gem_tasks.options = options
       gem_tasks.uninstall(*names)
     end
-        
+    
+    # Update the specified source repositories.
+    #
+    # The arguments can be actual repository names (from Merb::Source.repos)
+    # or names of known merb stack gems. If the repo doesn't exist already,
+    # it will be created and cloned.
+    #
+    # merb:source:pull merb-core                         # update source of specified gem
+    # merb:source:pull merb-slices                       # implicitly updates merb-more
+    
+    desc 'pull REPO_NAME [GEM_NAME, ...]', 'Update git source repository from edge'
+    def pull(*names)
+      repos = extract_repositories(names)
+      update_repositories(repos)
+      unless repos.empty?
+        message "Updated the following repositories:"
+        repos.each { |name, url| puts "- #{name}: #{url}" }
+      else
+        warning "No repositories found to update!"
+      end
+    end    
+    
+    # Clone a git repository into ./src. The repository can be a direct git url 
+    # or a known -named- repository.
+    #
+    # Examples:
+    #
+    # thor merb:source:clone merb-core 
+    # thor merb:source:clone dm-core awesome-repo
+    # thor merb:source:clone dm-core --sources ./path/to/sources.yml
+    # thor merb:source:clone git://github.com/sam/dm-core.git
+    
+    desc 'clone (REPO_NAME|URL) [DIR_NAME]', 'Clone git source repository by name or url'
+    def clone(repository, name = nil)
+      if repository =~ /^git:\/\//
+        repository_url  = repository
+        repository_name = File.basename(repository_url, '.git')
+      elsif url = Merb::Source.repo(repository, options[:sources])
+        repository_url = url
+        repository_name = repository
+      end
+      source_manager.clone(name || repository_name, repository_url)
+    end
+    
     # Git repository sources - pass source_config option to load a yaml 
     # configuration file - defaults to ./config/git-sources.yml and
     # ~/.merb/git-sources.yml - which you need to create yourself. 
