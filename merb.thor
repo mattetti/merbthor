@@ -339,7 +339,7 @@ TEXT
   def update_source_index(dir)
     Gem.source_index.load_gems_in(File.join(dir, 'specifications'))
   end
-  
+    
 end
 
 ##############################################################################
@@ -593,6 +593,11 @@ module MerbThorHelper
     Merb::Gem.ensure_bin_wrapper_for(gem_dir, bin_dir, *gems)
   end
   
+  def sudo
+    ENV['THOR_SUDO'] ||= "sudo"
+    sudo = Gem.win_platform? ? "" : ENV['THOR_SUDO']
+  end
+  
   def local_gemspecs(directory = gem_dir)
     if File.directory?(specs_dir = File.join(directory, 'specifications'))
       Dir[File.join(specs_dir, '*.gemspec')].map do |gemspec_path|
@@ -614,6 +619,10 @@ $SILENT = true # don't output all the mess some rake package tasks spit out
 module Merb
     
   class Dependencies < Thor
+    
+    # The Dependencies tasks will install dependencies based on actual application
+    # dependencies. For this, the application is queried for any dependencies.
+    # All operations will be performed within this context.
     
     attr_accessor :system, :local, :missing
     
@@ -720,7 +729,7 @@ module Merb
                    "--dry-run" => :boolean, 
                    "--force"   => :boolean                   
     def install(strategy = 'stable', comp = nil)
-      if self.respond_to?(method = :"#{strategy}_strategy", true)
+      if strategy?(strategy)
         # Force local dependencies by creating ./gems before proceeding
         create_if_missing(default_gem_dir) if options[:local]
         
@@ -747,27 +756,7 @@ module Merb
           warning "No dependencies to install..."
         else
           puts "#{deps.length} dependencies to install..."
-          # Clobber existing local dependencies
-          clobber_dependencies!
-        
-          # Run the chosen strategy - collect files installed from stable gems
-          installed_from_stable = send(method, deps).map { |d| d.name }
-          
-          # Sleep a bit otherwise the following steps won't see the new files
-          sleep(deps.length) if deps.length > 0
-          
-          # Leave a file to denote the strategy that has been used for this dependency
-          self.local.each do |spec|
-            next unless File.directory?(spec.full_gem_path)
-            unless installed_from_stable.include?(spec.name)
-              FileUtils.touch(File.join(spec.full_gem_path, "#{strategy}.strategy"))
-            else
-              FileUtils.touch(File.join(spec.full_gem_path, "stable.strategy"))
-            end           
-          end
-              
-          # Add local binaries for the installed framework dependencies
-          ensure_bin_wrapper_for(*Merb::Stack.all_components)
+          install_dependencies(strategy, deps)
         end
         
         # Show current dependency info now that we're done
@@ -883,6 +872,47 @@ module Merb
     end 
     
     ### Helper Methods
+    
+    def strategy?(strategy)
+      if self.respond_to?(method = :"#{strategy}_strategy", true)
+        method
+      end
+    end
+    
+    def install_dependencies(strategy, deps)
+      if method = strategy?(strategy)
+        # Clobber existing local dependencies
+        clobber_dependencies!
+    
+        # Run the chosen strategy - collect files installed from stable gems
+        installed_from_stable = send(method, deps).map { |d| d.name }
+      
+        # Sleep a bit otherwise the following steps won't see the new files
+        sleep(deps.length) if deps.length > 0
+      
+        # Leave a file to denote the strategy that has been used for this dependency
+        self.local.each do |spec|
+          next unless File.directory?(spec.full_gem_path)
+          unless installed_from_stable.include?(spec.name)
+            FileUtils.touch(File.join(spec.full_gem_path, "#{strategy}.strategy"))
+          else
+            FileUtils.touch(File.join(spec.full_gem_path, "stable.strategy"))
+          end           
+        end
+        
+        # Ask for system installation of minigem - needs sudo...
+        if deps.find { |d| d.name == 'minigems' }
+          info "Installing minigems.rb on your system..."
+          `#{sudo} minigem install`
+        end
+          
+        # Add local binaries for the installed framework dependencies
+        comps = Merb::Stack.all_components & deps.map { |d| d.name }
+        ensure_bin_wrapper_for(*comps)
+        return true
+      end
+      false
+    end
     
     def dependencies
       if use_config?
@@ -1049,29 +1079,7 @@ module Merb
       puts  "specify a config option (--config or --config-file=YAML_FILE)"
       return []
     end
-    
-    # def self.extract_dependencies(merb_root)
-    #   FileUtils.cd(merb_root) do
-    #     cmd = ["require 'yaml';"]
-    #     cmd << "begin"
-    #     cmd << "dependencies = Merb::BootLoader::Dependencies.dependencies"
-    #     cmd << "entries = dependencies.map { |d| d.to_s }"
-    #     cmd << "puts YAML.dump(entries)"
-    #     cmd << "rescue"
-    #     cmd << "end"
-    #     output = `merb -r "#{cmd.join("\n")}"`
-    #     lines = output.split(/\n/)
-    #     if index = lines.index('--- ')
-    #       yaml = lines.slice(index, lines.length - 1).join("\n")
-    #       return parse_dependencies_yaml(yaml)
-    #     elsif lines.index('--- []')
-    #       return []
-    #     end
-    #   end
-    #   error "Couldn't extract dependencies from application!"
-    #   return []
-    # end
-    
+        
     # Parse the basic YAML config data, and process Gem::Dependency output.
     # Formatting example: merb_helpers (>= 0.9.8, runtime)
     def self.parse_dependencies_yaml(yaml)
@@ -1092,19 +1100,105 @@ module Merb
   
   class Stack < Thor
     
-    MERB_CORE = %w[merb-core]
+    # The Stack tasks will install dependencies based on known sets of gems,
+    # regardless of actual application dependency settings.
+    
+    MERB_STACK = %w[
+      minigems
+      
+      merb-core
+      merb-action-args
+      merb-assets
+      merb-cache
+      merb-helpers
+      merb-mailer
+      merb-slices
+      merb-auth
+      
+      dm-core
+      dm-aggregates
+      dm-migrations
+      dm-timestamps
+      dm-types
+      dm-validations
+    ]
+    
+    MERB_BASICS = %w[
+      minigems
+      
+      merb-core
+      merb-action-args
+      merb-assets
+      merb-cache
+      merb-helpers
+      merb-mailer
+      merb-slices
+    ]
+    
     MERB_MORE = %w[
-      merb-action-args merb-assets merb-gen merb-haml
-      merb-builder merb-mailer merb-parts merb-cache 
-      merb-slices merb-jquery merb-helpers merb_datamapper
-      merb-auth merb-auth-core merb-auth-more merb-auth-slice-password
+      merb-action-args
+      merb-assets
+      merb-auth
+      merb-auth-core
+      merb-auth-more 
+      merb-auth-slice-password
+      merb-builder
+      merb-cache
+      merb-exceptions
+      merb-gen
+      merb-haml
+      merb-helpers
+      merb-jquery
+      merb-mailer
+      merb-param-protection
+      merb-parts
+      merb-slices
+      merb_datamapper
     ]
+    
     MERB_PLUGINS = %w[
-      merb_activerecord merb_sequel merb_param_protection 
-      merb_test_unit merb_stories merb_screw_unit merb_auth
+      merb_activerecord
+      merb_builder
+      merb_helpers
+      merb_jquery
+      merb_laszlo
+      merb_param_protection
+      merb_parts
+      merb_screw_unit
+      merb_sequel
+      merb_stories
+      merb_test_unit
     ]
-    DM_CORE = %w[dm-core]
-    DM_MORE = %w[]
+    
+    DM_MORE = %w[
+      dm-adjust
+      dm-aggregates
+      dm-ar-finders
+      dm-cli
+      dm-constraints
+      dm-is-example
+      dm-is-list
+      dm-is-nested_set
+      dm-is-remixable
+      dm-is-searchable
+      dm-is-state_machine
+      dm-is-tree
+      dm-is-versioned
+      dm-migrations
+      dm-observer
+      dm-querizer
+      dm-serializer
+      dm-shorthand
+      dm-sweatshop
+      dm-tags
+      dm-timestamps
+      dm-types
+      dm-validations
+      
+      dm-couchdb-adapter
+      dm-ferret-adapter
+      dm-rest-adapter
+    ]
     
     attr_accessor :system, :local, :missing
     
@@ -1113,47 +1207,133 @@ module Merb
     global_method_options = {
       "--merb-root"            => :optional,  # the directory to operate on
       "--include-dependencies" => :boolean,   # gather sub-dependencies
-      "--version"              => :optional   # gather specific version of framework
+      "--version"              => :optional   # gather specific version of framework      
     }
     
     method_options global_method_options
     def initialize(*args); super; end
     
+    # List components and their dependencies.
+    #
+    # Examples:
+    # 
+    # merb:stack:list                                           # list all components
+    # merb:stack:list merb-more                                 # list all dependencies of merb-more
   
-    
+    desc 'list [comp]', 'List available components (optionally filtered)'
     def list(comp = nil)
       if comp
         message "Dependencies for '#{comp}' set:"
-        p Merb::Stack.components(comp)
+        Merb::Stack.components(comp).each { |c| puts "- #{c}" }
       else
-        
+        Merb::Stack.component_sets.keys.sort.each do |comp|
+          unless (components = Merb::Stack.component_sets[comp]).empty?
+            message "Dependencies for '#{comp}' set:"
+            components.each { |c| puts "- #{c}" }
+          end
+        end
       end      
     end
     
-    # def install
-    #   
-    # end
-    # 
-    # def uninstall
-    #   
-    # end
+    # Install stack components or individual gems - from stable rubygems by default.
+    #
+    # See also: Merb::Dependencies#install and Merb::Dependencies#install_dependencies
+    #
+    # Examples:
+    #
+    # merb:stack:install                                        # install the default merb stack
+    # merb:stack:install basics                                 # install a basic set of dependencies
+    # merb:stack:install merb-core                              # install merb-core from stable
+    # merb:stack:install merb-more --edge                       # install merb-core from edge
+    # merb:stack:install merb-core thor merb-slices             # install the specified gems                  
+      
+    desc 'install [COMP, ...]', 'Install stack components'
+    method_options  "--edge"      => :boolean,
+                    "--sources"   => :optional,
+                    "--force"     => :boolean,
+                    "--dry-run"   => :boolean,
+                    "--strategy"  => :optional
+    def install(*comps)
+      mngr = self.dependency_manager
+      deps = gather_dependencies(comps)
+      mngr.system, mngr.local, mngr.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
+      mngr.install_dependencies(strategy, deps)
+    end
+        
+    # Uninstall stack components or individual gems.
+    #
+    # See also: Merb::Dependencies#uninstall
+    #
+    # Examples:
+    # merb:stack:uninstall                                      # uninstall the default merb stack
+    # merb:stack:uninstall merb-more                            # uninstall merb-more
+    # merb:stack:uninstall merb-core thor merb-slices           # uninstall the specified gems
+    
+    desc 'uninstall [COMP, ...]', 'Uninstall stack components'
+    method_options "--dry-run" => :boolean, "--force" => :boolean
+    def uninstall(*comps)
+      deps = gather_dependencies(comps)
+      self.system, self.local, self.missing = Merb::Gem.partition_dependencies(deps, gem_dir)
+      # Clobber existing local dependencies - based on self.local
+      clobber_dependencies!
+    end
+    
+    protected
+    
+    def gather_dependencies(comps = [])
+      if comps.empty?
+        gems = MERB_STACK
+      else
+        gems = comps.map { |c| Merb::Stack.components(c) }.flatten
+      end
+      
+      version_req = if options[:version]
+        ::Gem::Requirement.create(options[:version])
+      end
+      
+      framework_components = Merb::Stack.framework_components
+      
+      gems.map do |gem|
+        if version_req && framework_components.include?(gem)
+          ::Gem::Dependency.new(gem, version_req)
+        else
+          ::Gem::Dependency.new(gem, ::Gem::Requirement.default)
+        end
+      end
+    end
+    
+    def strategy
+      options[:strategy] || (options[:edge] ? 'edge' : 'stable')
+    end
+    
+    def dependency_manager
+      @_dependency_manager ||= begin
+        instance = Merb::Dependencies.new
+        instance.options = options
+        instance
+      end
+    end
+    
+    public
+    
+    def self.component_sets
+      @_component_sets ||= begin
+        # the component itself as a fallback
+        comps = Hash.new { |(hsh,c)| [c] }
+        comps["merb-more"]    = MERB_MORE.sort
+        comps["merb-plugins"] = MERB_PLUGINS.sort
+        comps["dm-more"]      = DM_MORE.sort
+        
+        # specific set of dependencies
+        comps["basics"]       = MERB_BASICS.sort
+        
+        comps
+      end
+    end
     
     def self.framework_components
       %w[merb-core merb-more merb-plugins].inject([]) do |all, comp| 
         all + components(comp)
-      end
-    end
-    
-    def self.component_sets
-      @_component_sets ||= begin
-        comps = { "thor" => ["thor"] }
-        comps["merb-core"]    = MERB_CORE
-        comps["merb-more"]    = MERB_MORE.sort
-        comps["merb-plugins"] = MERB_PLUGINS.sort
-        
-        comps["dm-core"]      = DM_CORE.sort
-        comps["dm-more"]      = DM_MORE.sort
-        comps
       end
     end
     
@@ -1245,7 +1425,7 @@ module Merb
     def update(url = 'http://merbivore.com/merb.thor')
       require 'open-uri'
       require 'rubygems/version'
-      remote_file = open('merb-newer.sample')
+      remote_file = open(url)
       code = remote_file.read
       
       # Extract version information from the source code
