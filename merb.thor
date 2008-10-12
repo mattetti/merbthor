@@ -1800,15 +1800,16 @@ module Merb
       end
     end    
     
-    # Clone a git repository into ./src. The repository can be a direct git url 
-    # or a known -named- repository.
+    # Clone a git repository into ./src. 
+    
+    # The repository can be a direct git url or a known -named- repository.
     #
     # Examples:
     #
-    # thor merb:source:clone merb-core 
-    # thor merb:source:clone dm-core awesome-repo
-    # thor merb:source:clone dm-core --sources ./path/to/sources.yml
-    # thor merb:source:clone git://github.com/sam/dm-core.git
+    # merb:source:clone merb-core 
+    # merb:source:clone dm-core awesome-repo
+    # merb:source:clone dm-core --sources ./path/to/sources.yml
+    # merb:source:clone git://github.com/sam/dm-core.git
     
     desc 'clone (REPO_NAME|URL) [DIR_NAME]', 'Clone git source repository by name or url'
     def clone(repository, name = nil)
