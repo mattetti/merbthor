@@ -228,10 +228,12 @@ module GemManagement
   end
   
   def rake(cmd)
-    system "#{Gem.ruby} -S #{which('rake')} -s #{cmd}"
+    cmd << " >/dev/null" if $SILENT && !Gem.win_platform?
+    system "#{Gem.ruby} -S #{which('rake')} -s #{cmd} >/dev/null"
   end
   
   def thor(cmd)
+    cmd << " >/dev/null" if $SILENT && !Gem.win_platform?
     system "#{Gem.ruby} -S #{which('thor')} #{cmd}"
   end
 
@@ -351,6 +353,7 @@ class SourceManager
   
   def clone(name, url)
     FileUtils.cd(source_dir) do
+      raise "destination directory already exists" if File.directory?(name)
       system("git clone --depth 1 #{url} #{name}")
     end
   rescue => e
@@ -419,17 +422,17 @@ module MerbThorHelper
     @_source_manager ||= SourceManager.new(source_dir)
   end
   
-  def extract_dependency_repositories(dependencies)
+  def extract_repositories(names)
     repos = []
-    dependencies.each do |dependency|
-      if repo_url = Merb::Source.repo(dependency.name, options[:sources])
+    names.each do |name|
+      if repo_url = Merb::Source.repo(name, options[:sources])
         # A repository entry for this dependency exists
-        repo = [dependency.name, repo_url]
+        repo = [name, repo_url]
         repos << repo unless repos.include?(repo) 
-      elsif (stack_name = Merb::Stack.lookup_component(dependency.name)) &&
+      elsif (stack_name = Merb::Stack.lookup_component(name)) &&
         (repo_url = Merb::Source.repo(stack_name, options[:sources]))
         # A parent repository entry for this dependency exists
-        puts "Found #{stack_name}/#{dependency.name} at #{repo_url}"
+        puts "Found #{stack_name}/#{name} at #{repo_url}"
         repo = [stack_name, repo_url]
         repos << repo unless repos.include?(repo) 
       end
@@ -438,8 +441,12 @@ module MerbThorHelper
   end
   
   def update_dependency_repositories(dependencies)
-    affected_repos = extract_dependency_repositories(dependencies)
-    affected_repos.each do |(name, url)|
+    repos = extract_repositories(dependencies.map { |d| d.name })
+    update_repositories(repos)
+  end
+  
+  def update_repositories(repos)
+    repos.each do |(name, url)|
       if File.directory?(repository_dir = File.join(source_dir, name))
         message "Updating or branching #{name}..."
         source_manager.update(name, url)
@@ -503,7 +510,7 @@ module MerbThorHelper
       gemspecs.each do |spec| 
         if hint = Dir[File.join(spec.full_gem_path, '*.strategy')][0]
           strategy = File.basename(hint, '.strategy')
-          puts "- #{spec.full_name} (#{strategy[0,1]})"
+          puts "- #{spec.full_name} (#{strategy})"
         else
           puts "~ #{spec.full_name}" # unknown strategy
         end
@@ -598,6 +605,8 @@ module MerbThorHelper
 end
 
 ##############################################################################
+
+$SILENT = true # don't output all the mess some rake package tasks spit out
 
 module Merb
   
@@ -703,15 +712,23 @@ module Merb
     # merb:dependencies:install edge --sources file.yml         # install edge from the specified git sources config
     
     desc 'install [stable|edge] [comp]', 'Install application dependencies'
-    method_options "--dry-run" => :boolean, "--force" => :boolean, "--sources" => :optional
+    method_options "--sources" => :optional, # only for edge strategy
+                   "--local"   => :boolean,  # force local install
+                   "--dry-run" => :boolean, 
+                   "--force"   => :boolean                   
     def install(strategy = 'stable', comp = nil)
       if self.respond_to?(method = :"#{strategy}_strategy", true)
+        # Force local dependencies by creating ./gems before proceeding
+        create_if_missing(default_gem_dir) if options[:local]
+        
+        where = gem_dir ? 'locally' : 'system-wide'
+        
         # When comp == 'missing' then filter on missing dependencies
         if only_missing = comp == 'missing'
-          message "Preparing to install missing gems using #{strategy} strategy..."
+          message "Preparing to install missing gems #{where} using #{strategy} strategy..."
           comp = nil
         else
-          message "Preparing to install using #{strategy} strategy..."
+          message "Preparing to install #{where} using #{strategy} strategy..."
         end
         
         # If comp given, filter on known stack components
@@ -745,9 +762,9 @@ module Merb
               FileUtils.touch(File.join(spec.full_gem_path, "stable.strategy"))
             end           
           end
-          
+              
           # Add local binaries for the installed framework dependencies
-          ensure_bin_wrapper_for(*Merb::Stack.framework_components)
+          ensure_bin_wrapper_for(*Merb::Stack.all_components)
         end
         
         # Show current dependency info now that we're done
@@ -875,7 +892,7 @@ module Merb
       end
       
       stack_components = Merb::Stack.components
-      
+
       if options[:stack]
         # Limit to stack components only
         deps.reject! { |dep| not stack_components.include?(dep.name) }
@@ -1011,24 +1028,46 @@ module Merb
     end
     
     # Extract application dependencies by querying the app directly.
-    def self.extract_dependencies(merb_root)
-      FileUtils.cd(merb_root) do
-        cmd = ["require 'yaml';"]
-        cmd << "begin"
-        cmd << "dependencies = Merb::BootLoader::Dependencies.dependencies"
-        cmd << "entries = dependencies.map { |d| d.to_s }"
-        cmd << "puts YAML.dump(entries)"
-        cmd << "rescue"
-        cmd << "end"
-        output = `merb -r "#{cmd.join("\n")}"`
-        if index = (lines = output.split(/\n/)).index('--- ')
-          yaml = lines.slice(index, lines.length - 1).join("\n")
-          return parse_dependencies_yaml(yaml)
-        end
+    def self.extract_dependencies(merb_root, env = 'production')
+      require 'merb-core'
+      if !@_merb_loaded || Merb.root != merb_root
+        Merb.start_environment(
+          :testing => true, 
+          :adapter => 'runner', 
+          :environment => env, 
+          :merb_root => merb_root
+        )
+        @_merb_loaded = true
       end
+      Merb::BootLoader::Dependencies.dependencies
+    rescue => e
       error "Couldn't extract dependencies from application!"
+      puts  "Make sure you're executing the task from your app (--merb-root), or"
+      puts  "specify a config option (--config or --config-file=YAML_FILE)"
       return []
     end
+    
+    # def self.extract_dependencies(merb_root)
+    #   FileUtils.cd(merb_root) do
+    #     cmd = ["require 'yaml';"]
+    #     cmd << "begin"
+    #     cmd << "dependencies = Merb::BootLoader::Dependencies.dependencies"
+    #     cmd << "entries = dependencies.map { |d| d.to_s }"
+    #     cmd << "puts YAML.dump(entries)"
+    #     cmd << "rescue"
+    #     cmd << "end"
+    #     output = `merb -r "#{cmd.join("\n")}"`
+    #     lines = output.split(/\n/)
+    #     if index = lines.index('--- ')
+    #       yaml = lines.slice(index, lines.length - 1).join("\n")
+    #       return parse_dependencies_yaml(yaml)
+    #     elsif lines.index('--- []')
+    #       return []
+    #     end
+    #   end
+    #   error "Couldn't extract dependencies from application!"
+    #   return []
+    # end
     
     # Parse the basic YAML config data, and process Gem::Dependency output.
     # Formatting example: merb_helpers (>= 0.9.8, runtime)
@@ -1128,6 +1167,14 @@ module Merb
       dependencies.select { |dep| comps.include?(dep.name) }
     end
     
+    def self.base_components
+      %w[thor rake]
+    end
+    
+    def self.all_components
+      base_components + framework_components
+    end
+    
     # Find the latest merb-core and gather its dependencies.
     # We check for 0.9.8 as a minimum release version.
     def self.core_dependencies(gem_dir = nil, ignore_deps = false)
@@ -1139,7 +1186,13 @@ module Merb
         merb_core = ::Gem::Dependency.new('merb-core', '>= 0.9.8')
         if gemspec = ::Gem.source_index.search(merb_core).last
           deps << ::Gem::Dependency.new('merb-core', gemspec.version)
-          deps += gemspec.dependencies unless ignore_deps
+          if ignore_deps 
+            deps += gemspec.dependencies.select do |d| 
+              base_components.include?(d.name)
+            end
+          else
+            deps += gemspec.dependencies
+          end
         end
         ::Gem.clear_paths if gem_dir # reset
         deps
@@ -1156,14 +1209,29 @@ module Merb
     
   end
   
-  class Util < Thor    
-  end
+  # class Tasks < Thor
+  #   
+  #   desc 'update [URL]', 'Fetch the latest merb.thor and install it locally'
+  #   def update_tasks(url = 'http://merbivore.com/merb.thor')
+  #     require 'open-uri'
+  #     remote_file = open(url)
+  #     File.open(File.join(working_dir, 'merb.thor'), 'w') do |f|
+  #       f.write(remote_file.read)
+  #     end
+  #     success "Installed the latest merb.thor"
+  #   rescue OpenURI::HTTPError
+  #     error "Error opening #{url}"
+  #   rescue => e
+  #     error "An error occurred (#{e.message})"
+  #   end
+  #   
+  # end
   
-  #### RAW TASKS ####
+  #### MORE LOW-LEVEL TASKS ####
   
   class Gem < Thor
     
-    group 'advanced'
+    group 'core'
     
     include MerbThorHelper
     extend GemManagement
@@ -1342,7 +1410,7 @@ module Merb
   
   class Source < Thor
     
-    group 'advanced'
+    group 'core'
         
     include MerbThorHelper
     extend GemManagement
@@ -1365,7 +1433,7 @@ module Merb
     # merb:source:list                                   # list all local sources
     # merb:source:list available                         # list all known sources
     
-    desc 'list [local|available]', 'Show source repositories'
+    desc 'list [local|available]', 'Show git source repositories'
     def list(mode = 'local')
       if mode == 'available'
         message 'Available source repositories:'
@@ -1403,7 +1471,7 @@ module Merb
     # merb:source:install merb-core --wipe               # clear repo then install the gem
     # merb:source:install merb-core --binaries           # also install adapted bin wrapper
 
-    desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from source/edge'
+    desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from git source/edge'
     method_options "--binaries"  => :boolean,
                    "--dry-run"   => :boolean,
                    "--force"     => :boolean,
@@ -1434,7 +1502,43 @@ module Merb
       error "Failed to install #{current_gem ? current_gem : 'gem'} (#{e.message})"
     end
     
-    def clone
+    # Update the specified source repositories.
+    #
+    # The arguments can be actual repository names (from Merb::Source.repos)
+    # or names of known merb stack gems. If the repo doesn't exist already,
+    # it will be created and cloned.
+    #
+    # merb:source:pull merb-core                         # update source of specified gem
+    # merb:source:pull merb-slices                       # implicitly updates merb-more
+    
+    desc 'pull REPO_NAME [GEM_NAME, ...]', 'Update git source repository from edge'
+    def pull(*names)
+      repos = extract_repositories(names)
+      update_repositories(repos)
+      message "Updated the following repositories:"
+      repos.each { |name, url| puts "- #{name}: #{url}" }
+    end    
+    
+    # Clone a git repository into ./src. The repository can be a direct git url 
+    # or a known -named- repository.
+    #
+    # Examples:
+    #
+    # thor merb:source:clone merb-core 
+    # thor merb:source:clone dm-core awesome-repo
+    # thor merb:source:clone dm-core --sources ./path/to/sources.yml
+    # thor merb:source:clone git://github.com/sam/dm-core.git
+    
+    desc 'clone (REPO_NAME|URL) [DIR_NAME]', 'Clone git source repository by name or url'
+    def clone(repository, name = nil)
+      if repository =~ /^git:\/\//
+        repository_url  = repository
+        repository_name = File.basename(repository_url, '.git')
+      elsif url = Merb::Source.repo(repository, options[:sources])
+        repository_url = url
+        repository_name = repository
+      end
+      source_manager.clone(name || repository_name, repository_url)
     end
     
     # Uninstall the specified gems.
@@ -1459,8 +1563,7 @@ module Merb
     def uninstall(*names)
       # Remove the repos that contain the gem
       if options[:wipe] 
-        deps = names.map { |n| ::Gem::Dependency.new(n, ::Gem::Requirement.default) }
-        extract_dependency_repositories(deps).each do |(name, url)|
+        extract_repositories(names).each do |(name, url)|
           if File.directory?(src = File.join(source_dir, name))
             if dry_run?
               note "Removing #{src}..."
@@ -1480,12 +1583,13 @@ module Merb
         
     # Git repository sources - pass source_config option to load a yaml 
     # configuration file - defaults to ./config/git-sources.yml and
-    # ~/.merb/git-sources.yml - which need to create yourself if desired. 
+    # ~/.merb/git-sources.yml - which you need to create yourself. 
     #
     # Example of contents:
     #
     # merb-core: git://github.com/myfork/merb-core.git
     # merb-more: git://github.com/myfork/merb-more.git
+    
     def self.repos(source_config = nil)
       source_config ||= begin
         local_config = File.join(Dir.pwd, 'config', 'git-sources.yml')
@@ -1515,6 +1619,7 @@ module Merb
         'sequel'        => "git://github.com/wayneeseguin/sequel.git",
         'do'            => "git://github.com/sam/do.git",
         'thor'          => "git://github.com/wycats/thor.git",
+        'rake'          => "git://github.com/jimweirich/rake.git",
         'minigems'      => "git://github.com/fabien/minigems.git"
       }
     end
