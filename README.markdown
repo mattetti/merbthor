@@ -103,8 +103,13 @@ This format is exactly the same as Gem::Dependency#to_s returns.
 - merb:dependencies:configure --config-file file.yml        # write to the specified config file 
    
 ## merb:stack:*
-  
+
+The Stack tasks will install dependencies based on known sets of gems,
+regardless of actual application dependency settings.
+
 ### List components and their dependencies.
+
+Will list dependencies from known sets of gems.
 
 #### Examples:
 
