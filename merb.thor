@@ -796,6 +796,8 @@ module Merb
       clobber_dependencies!
     end
     
+    # Recreate binary gems on the current platform.
+    #
     # This task should be executed as part of a deployment setup, where the 
     # deployment system runs this after the app has been installed.
     # Usually triggered by Capistrano, God...

@@ -68,6 +68,8 @@ matching component set will be removed.
 - merb:dependencies:uninstall merb-more                     # uninstall merb-more related gems locally
 - merb:dependencies:uninstall --config                      # read dependencies from the default config
 
+### Recreate binary gems on the current platform.
+
 This task should be executed as part of a deployment setup, where the 
 deployment system runs this after the app has been installed.
 Usually triggered by Capistrano, God...
