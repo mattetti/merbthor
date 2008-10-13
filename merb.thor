@@ -1141,19 +1141,14 @@ module Merb
       merb-action-args
       merb-assets
       merb-auth
-      merb-auth-core
-      merb-auth-more 
-      merb-auth-slice-password
-      merb-builder
+
       merb-cache
       merb-exceptions
       merb-gen
       merb-haml
       merb-helpers
-      merb-jquery
       merb-mailer
       merb-param-protection
-      merb-parts
       merb-slices
       merb_datamapper
     ]
@@ -1162,6 +1157,7 @@ module Merb
       merb_activerecord
       merb_builder
       merb_helpers
+      merb-parts
       merb_jquery
       merb_laszlo
       merb_param_protection
@@ -1334,7 +1330,7 @@ module Merb
     end
     
     def self.framework_components
-      %w[merb-core merb-more merb-plugins].inject([]) do |all, comp| 
+      %w[merb merb-plugins].inject([]) do |all, comp| 
         all + components(comp)
       end
     end
@@ -1343,7 +1339,7 @@ module Merb
       if comp
         component_sets[comp]
       else
-        comps = %w[merb-core merb-more merb-plugins dm-core dm-more]
+        comps = %w[merb merb-plugins dm-core dm-more]
         comps.inject([]) do |all, grp|
           all + (component_sets[grp] || [])
         end
@@ -1534,11 +1530,11 @@ module Merb
     # 
     # Examples:
     #
-    # merb:gem:install merb-core merb-slices          # install all specified gems
-    # merb:gem:install merb-core --version 0.9.8      # install a specific version of a gem
-    # merb:gem:install merb-core --force              # uninstall then subsequently install the gem
-    # merb:gem:install merb-core --cache              # try to install locally from system gems
-    # merb:gem:install merb-core --binaries           # also install adapted bin wrapper
+    # merb:gem:install merb merb-slices          # install all specified gems
+    # merb:gem:install merb --version 0.9.8      # install a specific version of a gem
+    # merb:gem:install merb --force              # uninstall then subsequently install the gem
+    # merb:gem:install merb --cache              # try to install locally from system gems
+    # merb:gem:install merb --binaries           # also install adapted bin wrapper
      
     desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from rubygems'
     method_options "--cache"     => :boolean,
@@ -1706,9 +1702,9 @@ module Merb
     # Examples:
     #
     # merb:source:install merb-core merb-slices          # install all specified gems
-    # merb:source:install merb-core --force              # uninstall then subsequently install the gem
-    # merb:source:install merb-core --wipe               # clear repo then install the gem
-    # merb:source:install merb-core --binaries           # also install adapted bin wrapper
+    # merb:source:install merb --force              # uninstall then subsequently install the gem
+    # merb:source:install merb --wipe               # clear repo then install the gem
+    # merb:source:install merb --binaries           # also install adapted bin wrapper
 
     desc 'install GEM_NAME [GEM_NAME, ...]', 'Install a gem from git source/edge'
     method_options "--binaries"  => :boolean,
@@ -1854,8 +1850,7 @@ module Merb
     # Default Git repositories
     def self.default_repos
       @_default_repos ||= { 
-        'merb-core'     => "git://github.com/wycats/merb-core.git",
-        'merb-more'     => "git://github.com/wycats/merb-more.git",
+        'merb'          => "git://github.com/wycats/merb.git",
         'merb-plugins'  => "git://github.com/wycats/merb-plugins.git",
         'extlib'        => "git://github.com/sam/extlib.git",
         'dm-core'       => "git://github.com/sam/dm-core.git",
